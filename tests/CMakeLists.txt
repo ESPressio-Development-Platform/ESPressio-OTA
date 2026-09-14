@@ -47,3 +47,25 @@ add_executable(espressio_ota_state_test ota_state_test.cpp)
 target_link_libraries(espressio_ota_state_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_state_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
 add_test(NAME espressio_ota_state_test COMMAND espressio_ota_state_test)
+
+# ESPressio-Units' own host tests provide a repository-owned Arduino compatibility
+# stub. Reuse that test-only surface for native OTA tests that reach Units through
+# State/Timing. Never expose the stub from OTA's production INTERFACE target.
+set(ESPRESSIO_OTA_NATIVE_TEST_TARGETS
+    espressio_ota_foundation_test
+    espressio_ota_composition_test
+    espressio_ota_manifest_test
+    espressio_ota_offer_test
+    espressio_ota_providers_test
+    espressio_ota_catalog_test
+    espressio_ota_component_handler_test
+    espressio_ota_update_plan_test
+    espressio_ota_durable_test
+    espressio_ota_state_test
+)
+set(_espressio_units_test_stubs "${CMAKE_CURRENT_SOURCE_DIR}/../deps/ESPressio-Units/tests/stubs")
+if(EXISTS "${_espressio_units_test_stubs}")
+    foreach(TEST_TARGET IN LISTS ESPRESSIO_OTA_NATIVE_TEST_TARGETS)
+        target_include_directories(${TEST_TARGET} PRIVATE "${_espressio_units_test_stubs}")
+    endforeach()
+endif()
