@@ -13,6 +13,7 @@ using Capacity = ConstrainedV1CapacityProfile;
 using TestManifest = Manifest<Capacity>;
 using TestSignedManifest = SignedManifest<Capacity>;
 using TestOffer = UpdateOffer<Capacity>;
+using TestWorkspace = ManifestWireWorkspace<Capacity>;
 
 constexpr std::array<std::uint8_t, 16> Id(std::uint8_t value) noexcept {
     std::array<std::uint8_t, 16> result{};
@@ -68,6 +69,7 @@ bool BuildEnvelope(TestSignedManifest& envelope) {
 }
 
 static_assert(ESPressio::Serializable::IsBoundedSerializable<TestOffer>);
+static_assert(sizeof(TestWorkspace) == Capacity::MaximumManifestBytes);
 
 } // namespace
 
@@ -93,51 +95,55 @@ int main() {
     summary.RequiredOTAProtocol = envelope.Content.RequiredOTAProtocol;
     summary.RequiredOTAFeatures = envelope.Content.RequiredOTAFeatures;
 
+    TestSignedManifest scratch;
+    TestWorkspace workspace;
+
     TestOffer reference;
     if (BuildManifestReferenceOffer(identifier, &claimToken, &summary, reference) != UpdateOfferStatus::Success) return 5;
-    if (ValidateUpdateOffer(reference) != UpdateOfferStatus::Success) return 6;
+    if (ValidateUpdateOffer(reference, scratch) != UpdateOfferStatus::Success) return 6;
     if (!reference.EmbeddedManifest.empty()) return 7;
     if (reference.CompatibilityClaimSchema != CompatibilityClaimTokenSchemaV1 ||
         reference.CompatibilityClaim.size() != claimToken.TokenLength) return 8;
-    if (ValidateUpdateOfferAgainstVerifiedManifest(reference, envelope.Content) != UpdateOfferStatus::Success) return 9;
+    if (ValidateUpdateOfferAgainstVerifiedManifest(reference, envelope.Content, scratch) != UpdateOfferStatus::Success) return 9;
 
     TestOffer embedded;
-    if (BuildEmbeddedManifestOffer(envelope, &claimToken, &summary, embedded) != UpdateOfferStatus::Success) return 10;
-    if (ValidateUpdateOffer(embedded) != UpdateOfferStatus::Success) return 11;
+    if (BuildEmbeddedManifestOffer(envelope, &claimToken, &summary, workspace, embedded) != UpdateOfferStatus::Success) return 10;
+    if (ValidateUpdateOffer(embedded, scratch) != UpdateOfferStatus::Success) return 11;
     if (embedded.EmbeddedManifest.empty() || embedded.EmbeddedManifest.size() > Capacity::MaximumManifestBytes) return 12;
-    if (ValidateUpdateOfferAgainstVerifiedManifest(embedded, envelope.Content) != UpdateOfferStatus::Success) return 13;
+    if (ValidateUpdateOfferAgainstVerifiedManifest(embedded, envelope.Content, scratch) != UpdateOfferStatus::Success) return 13;
 
     TestSignedManifest decoded;
-    if (DeserializeSignedManifest(embedded.EmbeddedManifest.data(), embedded.EmbeddedManifest.size(), decoded) != ManifestStatus::Success) return 14;
+    if (DeserializeSignedManifestIntoScratch(
+            embedded.EmbeddedManifest.data(), embedded.EmbeddedManifest.size(), decoded) != ManifestStatus::Success) return 14;
     if (decoded.Content.Identifier != envelope.Content.Identifier) return 15;
 
     TestOffer advisoryMismatch = reference;
     advisoryMismatch.AdvisorySummary.Release += 1U;
-    if (ValidateUpdateOfferAgainstVerifiedManifest(advisoryMismatch, envelope.Content) != UpdateOfferStatus::AdvisoryMismatch) return 16;
+    if (ValidateUpdateOfferAgainstVerifiedManifest(advisoryMismatch, envelope.Content, scratch) != UpdateOfferStatus::AdvisoryMismatch) return 16;
 
     TestOffer manifestMismatch = reference;
     manifestMismatch.Manifest = Id(99U);
-    if (ValidateUpdateOfferAgainstVerifiedManifest(manifestMismatch, envelope.Content) != UpdateOfferStatus::ManifestMismatch) return 17;
+    if (ValidateUpdateOfferAgainstVerifiedManifest(manifestMismatch, envelope.Content, scratch) != UpdateOfferStatus::ManifestMismatch) return 17;
 
     TestOffer strayEmbedded = reference;
     if (!strayEmbedded.EmbeddedManifest.push_back(0x01U)) return 18;
-    if (ValidateUpdateOffer(strayEmbedded) != UpdateOfferStatus::Invalid) return 19;
+    if (ValidateUpdateOffer(strayEmbedded, scratch) != UpdateOfferStatus::Invalid) return 19;
 
     TestOffer malformedClaim = reference;
     malformedClaim.CompatibilityClaimSchema = 0U;
-    if (ValidateUpdateOffer(malformedClaim) != UpdateOfferStatus::Invalid) return 20;
+    if (ValidateUpdateOffer(malformedClaim, scratch) != UpdateOfferStatus::Invalid) return 20;
 
     TestOffer absentSummary = reference;
     absentSummary.HasAdvisorySummary = 0U;
     absentSummary.AdvisorySummary = {};
-    if (ValidateUpdateOffer(absentSummary) != UpdateOfferStatus::Success) return 21;
+    if (ValidateUpdateOffer(absentSummary, scratch) != UpdateOfferStatus::Success) return 21;
 
     TestSignedManifest badEnvelope = envelope;
     badEnvelope.Signatures.clear();
     TestOffer rejected;
     const auto* noClaim = static_cast<const CompatibilityClaimToken<Capacity>*>(nullptr);
     const auto* noSummary = static_cast<const UpdateOfferAdvisorySummary*>(nullptr);
-    if (BuildEmbeddedManifestOffer(badEnvelope, noClaim, noSummary, rejected) != UpdateOfferStatus::Invalid) return 22;
+    if (BuildEmbeddedManifestOffer(badEnvelope, noClaim, noSummary, workspace, rejected) != UpdateOfferStatus::Invalid) return 22;
 
     return 0;
 }
