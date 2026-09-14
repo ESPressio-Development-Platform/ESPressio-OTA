@@ -208,6 +208,13 @@ enum class DiagnosticContextKey : std::uint16_t {
 struct DiagnosticContextEntry final {
     DiagnosticContextKey Key{DiagnosticContextKey::None};
     std::uint64_t Value{0};
+
+    constexpr bool operator==(const DiagnosticContextEntry& other) const noexcept {
+        return Key == other.Key && Value == other.Value;
+    }
+    constexpr bool operator!=(const DiagnosticContextEntry& other) const noexcept {
+        return !(*this == other);
+    }
 };
 
 struct Diagnostic final {
@@ -222,12 +229,30 @@ struct Diagnostic final {
         Context[ContextCount++] = {key, value};
         return true;
     }
+
+    constexpr bool operator==(const Diagnostic& other) const noexcept {
+        if (Domain != other.Domain || Reason != other.Reason || NativeCode != other.NativeCode ||
+            ContextCount != other.ContextCount || ContextCount > Context.size()) return false;
+        for (std::size_t i = 0U; i < ContextCount; ++i) {
+            if (Context[i] != other.Context[i]) return false;
+        }
+        return true;
+    }
+    constexpr bool operator!=(const Diagnostic& other) const noexcept {
+        return !(*this == other);
+    }
 };
 
 struct Result final {
     OutcomeClass Outcome{OutcomeClass::Failed};
     Diagnostic Detail{};
     constexpr explicit operator bool() const noexcept { return Outcome == OutcomeClass::Success; }
+    constexpr bool operator==(const Result& other) const noexcept {
+        return Outcome == other.Outcome && Detail == other.Detail;
+    }
+    constexpr bool operator!=(const Result& other) const noexcept {
+        return !(*this == other);
+    }
     static constexpr Result Success() noexcept { return {OutcomeClass::Success, {}}; }
 };
 
