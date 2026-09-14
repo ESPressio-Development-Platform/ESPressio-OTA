@@ -16,3 +16,4 @@
 #include "ESPressio_OTAProviders.hpp"
 #include "ESPressio_OTACatalog.hpp"
 #include "ESPressio_OTACheckpoint.hpp"
+#include "ESPressio_OTADurable.hpp"
