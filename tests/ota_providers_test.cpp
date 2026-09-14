@@ -150,7 +150,9 @@ public:
         descriptor_.Identifier = ArtifactIdentifier{Id(5U)};
         descriptor_.Length = bytes_.size();
         descriptor_.DigestAlgorithm = ESPressio::Security::DigestAlgorithm::SHA256;
-        for (std::size_t i = 0U; i < 32U; ++i) (void)descriptor_.Digest.push_back(static_cast<std::uint8_t>(i));
+        for (std::size_t i = 0U; i < 32U; ++i) {
+            (void)descriptor_.Digest.push_back(static_cast<std::uint8_t>(i));
+        }
     }
     const VerifiedArtifactDescriptor<Capacity>& Descriptor() const noexcept override { return descriptor_; }
     Result Reset() noexcept override { offset_ = 0U; return Result::Success(); }
@@ -242,8 +244,7 @@ constexpr ESPressio::System::DeviceIdentifier Device(std::uint8_t value) noexcep
     return ESPressio::System::DeviceIdentifier{bytes};
 }
 
-static_assert(ESPressio::Serializable::IsBoundedSerializable<Checkpoint>);
-static_assert(ESPressio::Serializable::MaximumSerializedSize<Checkpoint, ESPressio::Serializable::DirectBinary>
+static_assert(MaximumArtifactCheckpointEncodedBytes<Capacity>
               <= Capacity::MaximumArtifactCheckpointRecordBytes);
 
 } // namespace
@@ -300,16 +301,13 @@ int main() {
     if (!store.BeginWrite(storeRequest)) return 16;
     if (!store.Write(firstBytes.data(), firstBytes.size()).IsValidFor(firstBytes.size())) return 17;
     if (store.Finalize().Status != ArtifactStoreFinalizeStatus::Stored) return 18;
-
     if (!store.BeginWrite(storeRequest)) return 19;
     (void)store.Write(firstBytes.data(), firstBytes.size());
     if (store.Finalize().Status != ArtifactStoreFinalizeStatus::AlreadyPresent) return 20;
-
     const std::array<std::uint8_t, 4> otherBytes{{1U, 2U, 3U, 5U}};
     if (!store.BeginWrite(storeRequest)) return 21;
     (void)store.Write(otherBytes.data(), otherBytes.size());
     if (store.Finalize().Status != ArtifactStoreFinalizeStatus::IdentifierCollision) return 22;
-
     std::uint64_t available = 0U;
     if (!store.QueryAvailableBytes(available) || available != 12U) return 23;
 
@@ -351,29 +349,37 @@ int main() {
     checkpoint.AcceptedPrefixLength = 50U;
     checkpoint.Revision = 1U;
     checkpoint.PrefixDigestAlgorithm = ESPressio::Security::DigestAlgorithm::SHA256.Value();
-    for (std::size_t i = 0U; i < 32U; ++i) (void)checkpoint.PrefixDigest.push_back(static_cast<std::uint8_t>(i + 1U));
+    for (std::size_t i = 0U; i < 32U; ++i) {
+        (void)checkpoint.PrefixDigest.push_back(static_cast<std::uint8_t>(i + 1U));
+    }
     if (!ArtifactCheckpointValid(checkpoint)) return 34;
 
     std::array<std::uint8_t, Capacity::MaximumArtifactCheckpointRecordBytes> checkpointBytes{};
-    const auto encoded = ESPressio::Serializable::SerializeDirectBinary(
-        checkpoint, checkpointBytes.data(), checkpointBytes.size());
-    if (!encoded) return 35;
+    std::size_t checkpointWritten = 0U;
+    if (SerializeArtifactCheckpoint(
+            checkpoint, checkpointBytes.data(), checkpointBytes.size(), checkpointWritten)
+        != ArtifactCheckpointCodecStatus::Success) return 35;
+    if (checkpointWritten > Capacity::MaximumArtifactCheckpointRecordBytes) return 36;
     Checkpoint restored;
-    const auto decoded = ESPressio::Serializable::DeserializeBoundedDirectBinaryIntoScratch(
-        checkpointBytes.data(), encoded.Bytes, restored);
-    if (!decoded || !ArtifactCheckpointValid(restored) || restored.AcceptedPrefixLength != 50U) return 36;
+    if (DeserializeArtifactCheckpoint(checkpointBytes.data(), checkpointWritten, restored)
+        != ArtifactCheckpointCodecStatus::Success) return 37;
+    if (!ArtifactCheckpointValid(restored) || restored.AcceptedPrefixLength != 50U) return 38;
 
     restored.AcceptedPrefixLength = restored.ExpectedLength + 1U;
-    if (ArtifactCheckpointValid(restored)) return 37;
+    if (ArtifactCheckpointValid(restored)) return 39;
 
     Checkpoint emptyPrefix;
     emptyPrefix.Transaction = 1U;
     emptyPrefix.Artifact = Id(4U);
     emptyPrefix.ExpectedLength = 100U;
     emptyPrefix.Revision = 1U;
-    if (!ArtifactCheckpointValid(emptyPrefix)) return 38;
+    if (!ArtifactCheckpointValid(emptyPrefix)) return 40;
     emptyPrefix.PrefixDigestAlgorithm = ESPressio::Security::DigestAlgorithm::SHA256.Value();
-    if (ArtifactCheckpointValid(emptyPrefix)) return 39;
+    if (ArtifactCheckpointValid(emptyPrefix)) return 41;
+
+    checkpointBytes[0] = 0U;
+    if (DeserializeArtifactCheckpoint(checkpointBytes.data(), checkpointWritten, restored)
+        != ArtifactCheckpointCodecStatus::Malformed) return 42;
 
     return 0;
 }
