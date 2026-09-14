@@ -362,7 +362,7 @@ struct LastUpdateOutcomeValue final {
 
 #define ESPRESSIO_OTA_DECLARE_STATE(TName, TValue, TId, TCanonicalName) \
     struct TName final : State::TransmissibleState<TName, TValue> { \
-        static constexpr State::StateTypeId TypeId{TId}; \
+        static constexpr ::ESPressio::State::StateTypeId TypeId{TId}; \
         static constexpr std::string_view CanonicalName{TCanonicalName}; \
         using ConvergencePolicy = OTAStateConvergence; \
     }
