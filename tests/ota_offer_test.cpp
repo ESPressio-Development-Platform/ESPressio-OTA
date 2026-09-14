@@ -135,7 +135,9 @@ int main() {
     TestSignedManifest badEnvelope = envelope;
     badEnvelope.Signatures.clear();
     TestOffer rejected;
-    if (BuildEmbeddedManifestOffer(badEnvelope, nullptr, nullptr, rejected) != UpdateOfferStatus::Invalid) return 22;
+    const auto* noClaim = static_cast<const CompatibilityClaimToken<Capacity>*>(nullptr);
+    const auto* noSummary = static_cast<const UpdateOfferAdvisorySummary*>(nullptr);
+    if (BuildEmbeddedManifestOffer(badEnvelope, noClaim, noSummary, rejected) != UpdateOfferStatus::Invalid) return 22;
 
     return 0;
 }
