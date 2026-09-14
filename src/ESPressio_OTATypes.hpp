@@ -8,6 +8,25 @@ namespace ESPressio::OTA {
 
 namespace Detail {
 
+template <std::size_t N>
+constexpr bool FixedBytesEqual(const std::array<std::uint8_t, N>& left,
+                               const std::array<std::uint8_t, N>& right) noexcept {
+    for (std::size_t i = 0; i < N; ++i) {
+        if (left[i] != right[i]) return false;
+    }
+    return true;
+}
+
+template <std::size_t N>
+constexpr bool FixedBytesLess(const std::array<std::uint8_t, N>& left,
+                              const std::array<std::uint8_t, N>& right) noexcept {
+    for (std::size_t i = 0; i < N; ++i) {
+        if (left[i] < right[i]) return true;
+        if (left[i] > right[i]) return false;
+    }
+    return false;
+}
+
 template <typename TTag, typename TValue>
 class StrongScalar final {
     TValue value_{};
@@ -35,9 +54,13 @@ public:
         for (auto byte : bytes_) if (byte != 0U) return true;
         return false;
     }
-    constexpr bool operator==(const Strong128& other) const noexcept { return bytes_ == other.bytes_; }
+    constexpr bool operator==(const Strong128& other) const noexcept {
+        return FixedBytesEqual(bytes_, other.bytes_);
+    }
     constexpr bool operator!=(const Strong128& other) const noexcept { return !(*this == other); }
-    constexpr bool operator<(const Strong128& other) const noexcept { return bytes_ < other.bytes_; }
+    constexpr bool operator<(const Strong128& other) const noexcept {
+        return FixedBytesLess(bytes_, other.bytes_);
+    }
 };
 
 } // namespace Detail
@@ -85,7 +108,9 @@ public:
         for (auto byte : bytes_) if (byte != 0U) return true;
         return false;
     }
-    constexpr bool operator==(const UpdateTargetProfileFingerprint& other) const noexcept { return bytes_ == other.bytes_; }
+    constexpr bool operator==(const UpdateTargetProfileFingerprint& other) const noexcept {
+        return Detail::FixedBytesEqual(bytes_, other.bytes_);
+    }
     constexpr bool operator!=(const UpdateTargetProfileFingerprint& other) const noexcept { return !(*this == other); }
 };
 
