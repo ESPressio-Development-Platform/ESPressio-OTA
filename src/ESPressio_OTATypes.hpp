@@ -43,6 +43,21 @@ public:
     constexpr bool operator>=(StrongScalar other) const noexcept { return value_ >= other.value_; }
 };
 
+template <typename TTag, typename TValue>
+class ZeroPermittedScalar final {
+    TValue value_{};
+public:
+    constexpr ZeroPermittedScalar() noexcept = default;
+    constexpr explicit ZeroPermittedScalar(TValue value) noexcept : value_(value) {}
+    constexpr TValue Value() const noexcept { return value_; }
+    constexpr bool operator==(ZeroPermittedScalar other) const noexcept { return value_ == other.value_; }
+    constexpr bool operator!=(ZeroPermittedScalar other) const noexcept { return !(*this == other); }
+    constexpr bool operator<(ZeroPermittedScalar other) const noexcept { return value_ < other.value_; }
+    constexpr bool operator<=(ZeroPermittedScalar other) const noexcept { return value_ <= other.value_; }
+    constexpr bool operator>(ZeroPermittedScalar other) const noexcept { return value_ > other.value_; }
+    constexpr bool operator>=(ZeroPermittedScalar other) const noexcept { return value_ >= other.value_; }
+};
+
 template <typename TTag>
 class Strong128 final {
     std::array<std::uint8_t, 16> bytes_{};
@@ -77,23 +92,24 @@ struct SecurityGenerationTag;
 struct ManifestSchemaVersionTag;
 struct OTAProtocolVersionTag;
 struct OTADurableSchemaVersionTag;
+struct UpdateTargetProfileSchemaVersionTag;
 struct ComponentIdentifierTag;
 struct ArtifactIdentifierTag;
 struct ManifestIdentifierTag;
-struct UpdateTargetProfileFingerprintTag;
 
 using ComponentTypeId = Detail::StrongScalar<ComponentTypeIdTag, std::uint64_t>;
 using StageTypeId = Detail::StrongScalar<StageTypeIdTag, std::uint64_t>;
 using HealthConditionTypeId = Detail::StrongScalar<HealthConditionTypeIdTag, std::uint64_t>;
 using PolicyDecisionPointTypeId = Detail::StrongScalar<PolicyDecisionPointTypeIdTag, std::uint64_t>;
 using ReleaseIdentifier = Detail::StrongScalar<ReleaseIdentifierTag, std::uint64_t>;
-using ReleaseChannelIdentifier = Detail::StrongScalar<ReleaseChannelIdentifierTag, std::uint32_t>;
+using ReleaseChannelIdentifier = Detail::ZeroPermittedScalar<ReleaseChannelIdentifierTag, std::uint32_t>;
 using UpdateGenerationId = Detail::StrongScalar<UpdateGenerationIdTag, std::uint64_t>;
 using UpdateTransactionId = Detail::StrongScalar<UpdateTransactionIdTag, std::uint64_t>;
-using SecurityGeneration = Detail::StrongScalar<SecurityGenerationTag, std::uint64_t>;
+using SecurityGeneration = Detail::ZeroPermittedScalar<SecurityGenerationTag, std::uint64_t>;
 using ManifestSchemaVersion = Detail::StrongScalar<ManifestSchemaVersionTag, std::uint16_t>;
 using OTAProtocolVersion = Detail::StrongScalar<OTAProtocolVersionTag, std::uint16_t>;
 using OTADurableSchemaVersion = Detail::StrongScalar<OTADurableSchemaVersionTag, std::uint16_t>;
+using UpdateTargetProfileSchemaVersion = Detail::StrongScalar<UpdateTargetProfileSchemaVersionTag, std::uint16_t>;
 using ComponentIdentifier = Detail::StrongScalar<ComponentIdentifierTag, std::uint32_t>;
 using ArtifactIdentifier = Detail::Strong128<ArtifactIdentifierTag>;
 using ManifestIdentifier = Detail::Strong128<ManifestIdentifierTag>;
@@ -126,6 +142,7 @@ static_assert(sizeof(SecurityGeneration) == 8U);
 static_assert(sizeof(ManifestSchemaVersion) == 2U);
 static_assert(sizeof(OTAProtocolVersion) == 2U);
 static_assert(sizeof(OTADurableSchemaVersion) == 2U);
+static_assert(sizeof(UpdateTargetProfileSchemaVersion) == 2U);
 static_assert(sizeof(ComponentIdentifier) == 4U);
 static_assert(sizeof(ArtifactIdentifier) == 16U);
 static_assert(sizeof(ManifestIdentifier) == 16U);
@@ -134,6 +151,7 @@ static_assert(sizeof(UpdateTargetProfileFingerprint) == 32U);
 inline constexpr ManifestSchemaVersion ManifestSchemaV1{1U};
 inline constexpr OTAProtocolVersion OTAProtocolV1{1U};
 inline constexpr OTADurableSchemaVersion OTADurableSchemaV1{1U};
+inline constexpr UpdateTargetProfileSchemaVersion UpdateTargetProfileSchemaV1{1U};
 
 using OTAFeatureFlags = std::uint64_t;
 
