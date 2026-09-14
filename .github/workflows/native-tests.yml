@@ -36,6 +36,21 @@ jobs:
           repository: ESPressio-Development-Platform/ESPressio-Serializable
           ref: ota_v1
           path: deps/ESPressio-Serializable
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Primitive
+          ref: primitives_redesign
+          path: deps/ESPressio-Primitive
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Timing
+          ref: primitives_redesign
+          path: deps/ESPressio-Timing
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-State
+          ref: primitives_redesign
+          path: deps/ESPressio-State
       - name: Configure
         run: cmake -S . -B build
       - name: Build
