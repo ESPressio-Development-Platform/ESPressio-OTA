@@ -5,6 +5,7 @@
 #include "ESPressio_OTAComposition.hpp"
 #include "ESPressio_OTAComponent.hpp"
 #include "ESPressio_OTAComponentHandler.hpp"
+#include "ESPressio_OTAUpdatePlan.hpp"
 #include "ESPressio_OTAStage.hpp"
 #include "ESPressio_OTAProfile.hpp"
 #include "ESPressio_OTAProfileWire.hpp"
