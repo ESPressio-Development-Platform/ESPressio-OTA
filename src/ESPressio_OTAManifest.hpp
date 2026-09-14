@@ -601,41 +601,4 @@ ManifestStatus ValidateSignedManifestEnvelope(const SignedManifest<TCapacityProf
     return ManifestStatus::Success;
 }
 
-template<typename TCapacityProfile>
-ManifestStatus VerifySignedManifest(
-    const SignedManifest<TCapacityProfile>& envelope,
-    Security::ISignatureVerifier& verifier,
-    const Security::ITrustAnchorProvider& anchors,
-    const Security::ITrustPolicy& policy) noexcept {
-    const auto valid = ValidateSignedManifestEnvelope(envelope);
-    if (valid != ManifestStatus::Success) return valid;
-
-    std::array<std::uint8_t, TCapacityProfile::MaximumManifestBytes> canonical{};
-    std::size_t canonicalBytes = 0U;
-    const auto encoded = SerializeCanonicalManifest(
-        envelope.Content, canonical.data(), canonical.size(), canonicalBytes);
-    if (encoded != ManifestStatus::Success) return encoded;
-
-    for (std::size_t i = 0U; i < envelope.Signatures.size(); ++i) {
-        const auto& descriptor = envelope.Content.SignatureDescriptors[i];
-        const Security::SignatureAlgorithmIdentifier algorithm{descriptor.Algorithm};
-        const Security::TrustAnchorIdentifier anchorId{descriptor.TrustAnchor};
-        const Security::TrustPolicyIdentifier policyId{descriptor.TrustPolicy};
-        if (!verifier.Supports(algorithm)) continue;
-
-        Security::TrustAnchorView anchor{};
-        if (!anchors.Resolve(anchorId, anchor)) continue;
-        if (!policy.Authorize(policyId, Security::TrustPurpose::SoftwareUpdateManifest, anchorId)) continue;
-        const auto& signature = envelope.Signatures[i].Bytes;
-        if (verifier.Verify(
-                algorithm,
-                Security::ByteView{canonical.data(), canonicalBytes},
-                Security::ByteView{signature.data(), signature.size()},
-                anchor)) {
-            return ManifestStatus::Success;
-        }
-    }
-    return ManifestStatus::NoTrustedSignature;
-}
-
 } // namespace ESPressio::OTA
