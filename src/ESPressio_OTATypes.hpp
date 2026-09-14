@@ -94,6 +94,7 @@ struct OTAProtocolVersionTag;
 struct OTADurableSchemaVersionTag;
 struct UpdateTargetProfileSchemaVersionTag;
 struct ComponentIdentifierTag;
+struct ArtifactRoleIdentifierTag;
 struct ArtifactIdentifierTag;
 struct ManifestIdentifierTag;
 
@@ -111,6 +112,7 @@ using OTAProtocolVersion = Detail::StrongScalar<OTAProtocolVersionTag, std::uint
 using OTADurableSchemaVersion = Detail::StrongScalar<OTADurableSchemaVersionTag, std::uint16_t>;
 using UpdateTargetProfileSchemaVersion = Detail::StrongScalar<UpdateTargetProfileSchemaVersionTag, std::uint16_t>;
 using ComponentIdentifier = Detail::StrongScalar<ComponentIdentifierTag, std::uint32_t>;
+using ArtifactRoleIdentifier = Detail::StrongScalar<ArtifactRoleIdentifierTag, std::uint16_t>;
 using ArtifactIdentifier = Detail::Strong128<ArtifactIdentifierTag>;
 using ManifestIdentifier = Detail::Strong128<ManifestIdentifierTag>;
 
@@ -144,6 +146,7 @@ static_assert(sizeof(OTAProtocolVersion) == 2U);
 static_assert(sizeof(OTADurableSchemaVersion) == 2U);
 static_assert(sizeof(UpdateTargetProfileSchemaVersion) == 2U);
 static_assert(sizeof(ComponentIdentifier) == 4U);
+static_assert(sizeof(ArtifactRoleIdentifier) == 2U);
 static_assert(sizeof(ArtifactIdentifier) == 16U);
 static_assert(sizeof(ManifestIdentifier) == 16U);
 static_assert(sizeof(UpdateTargetProfileFingerprint) == 32U);
