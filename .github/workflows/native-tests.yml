@@ -11,6 +11,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-System
+          ref: ota_v1
+          path: deps/ESPressio-System
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Platform
+          ref: ota_v1
+          path: deps/ESPressio-Platform
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Persistence
+          ref: ota_v1
+          path: deps/ESPressio-Persistence
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Security
+          ref: ota_v1
+          path: deps/ESPressio-Security
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Serializable
+          ref: primitives_redesign
+          path: deps/ESPressio-Serializable
       - name: Configure
         run: cmake -S . -B build
       - name: Build
