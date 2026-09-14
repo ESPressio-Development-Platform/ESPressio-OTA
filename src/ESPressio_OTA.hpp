@@ -8,3 +8,5 @@
 #include "ESPressio_OTAProfileWire.hpp"
 #include "ESPressio_OTACompatibilityClaim.hpp"
 #include "ESPressio_OTAManifest.hpp"
+#include "ESPressio_OTAManifestWire.hpp"
+#include "ESPressio_OTAOffer.hpp"
