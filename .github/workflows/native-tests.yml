@@ -40,5 +40,7 @@ jobs:
         run: cmake -S . -B build
       - name: Build
         run: cmake --build build --parallel
+      - name: OTA constrained object footprint report
+        run: ./build/tests/espressio_ota_offer_test
       - name: Test
         run: ctest --test-dir build --output-on-failure
