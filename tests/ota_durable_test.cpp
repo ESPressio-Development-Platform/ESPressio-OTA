@@ -199,31 +199,40 @@ int main() {
     ActiveTransactionRecord ambiguous;
     if (afterRestart.BeginTransaction(ReleaseIdentifier{31U}, ManifestIdentifier{Id(31U)}, SecurityGeneration{1U}, ambiguous) !=
         OTADurableStatus::CommitAmbiguous) return 28;
-    if (ambiguous.IsValid()) return 29;
+    if (ambiguous.IsValid() || !afterRestart.HasAmbiguousCommit()) return 29;
     if (afterRestart.Load(loaded) != OTADurableStatus::Success || loaded.HasActiveTransaction ||
         loaded.NextTransaction != UpdateTransactionId{3U} || loaded.NextGeneration != UpdateGenerationId{4U}) return 30;
 
+    // Unknown commit durability blocks further mutation in this service instance.
+    if (afterRestart.BeginTransaction(ReleaseIdentifier{31U}, ManifestIdentifier{Id(31U)}, SecurityGeneration{1U}, ambiguous) !=
+        OTADurableStatus::CommitAmbiguous) return 31;
+
+    // Simulated restart/recovery establishes that the old complete record survived,
+    // after which that uncommitted ID is safe to allocate again.
+    OTAControlStore<Capacity> recoveredAfterAmbiguity{store};
+    if (recoveredAfterAmbiguity.Load(loaded) != OTADurableStatus::Success || loaded.HasActiveTransaction) return 32;
     ActiveTransactionRecord third;
-    if (afterRestart.BeginTransaction(ReleaseIdentifier{31U}, ManifestIdentifier{Id(31U)}, SecurityGeneration{1U}, third) != OTADurableStatus::Success) return 31;
-    if (third.Transaction != UpdateTransactionId{3U} || third.CandidateGeneration != UpdateGenerationId{4U}) return 32;
-    if (afterRestart.MarkRecoveryRequired() != OTADurableStatus::Success) return 33;
-    if (afterRestart.Load(loaded) != OTADurableStatus::Success || loaded.Intent != DurableIntent::RecoveryRequired) return 34;
+    if (recoveredAfterAmbiguity.BeginTransaction(
+            ReleaseIdentifier{31U}, ManifestIdentifier{Id(31U)}, SecurityGeneration{1U}, third) != OTADurableStatus::Success) return 33;
+    if (third.Transaction != UpdateTransactionId{3U} || third.CandidateGeneration != UpdateGenerationId{4U}) return 34;
+    if (recoveredAfterAmbiguity.MarkRecoveryRequired() != OTADurableStatus::Success) return 35;
+    if (recoveredAfterAmbiguity.Load(loaded) != OTADurableStatus::Success || loaded.Intent != DurableIntent::RecoveryRequired) return 36;
 
     ArtifactCheckpointStore<Capacity> checkpoints{store};
     const auto checkpoint = Checkpoint(third.Transaction, 7U);
-    if (checkpoints.Save(1U, checkpoint) != OTADurableStatus::Success) return 35;
+    if (checkpoints.Save(1U, checkpoint) != OTADurableStatus::Success) return 37;
     ArtifactCheckpoint<Capacity> restored;
     if (checkpoints.Load(1U, restored) != OTADurableStatus::Success || restored.Transaction != third.Transaction.Value() ||
-        restored.AcceptedPrefixLength != 256U) return 36;
+        restored.AcceptedPrefixLength != 256U) return 38;
     std::size_t slot = 0U;
     ArtifactCheckpoint<Capacity> found;
-    if (checkpoints.Find(third.Transaction, ArtifactIdentifier{Id(7U)}, found, slot) != OTADurableStatus::Success || slot != 1U) return 37;
-    if (checkpoints.Remove(1U) != OTADurableStatus::Success) return 38;
-    if (checkpoints.Load(1U, restored) != OTADurableStatus::NotFound) return 39;
+    if (checkpoints.Find(third.Transaction, ArtifactIdentifier{Id(7U)}, found, slot) != OTADurableStatus::Success || slot != 1U) return 39;
+    if (checkpoints.Remove(1U) != OTADurableStatus::Success) return 40;
+    if (checkpoints.Load(1U, restored) != OTADurableStatus::NotFound) return 41;
 
-    if (!store.Corrupt(OTAControlStore<Capacity>::RecordKey())) return 40;
+    if (!store.Corrupt(OTAControlStore<Capacity>::RecordKey())) return 42;
     OTAControlStore<Capacity> corruptedStore{store};
-    if (corruptedStore.Load(loaded) != OTADurableStatus::Corrupt) return 41;
+    if (corruptedStore.Load(loaded) != OTADurableStatus::Corrupt) return 43;
 
     return 0;
 }
