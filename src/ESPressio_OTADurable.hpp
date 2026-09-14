@@ -412,7 +412,6 @@ public:
         ManifestIdentifier manifest,
         SecurityGeneration candidateSecurity,
         ActiveTransactionRecord& allocated) noexcept {
-        allocated = {};
         if (!release || !manifest) return OTADurableStatus::Invalid;
 
         const auto ready = MutationReady();
