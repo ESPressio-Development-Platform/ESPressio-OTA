@@ -53,6 +53,11 @@ jobs:
           path: deps/ESPressio-Observable
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-Threads
+          ref: primitives_redesign
+          path: deps/ESPressio-Threads
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-Timing
           ref: primitives_redesign
           path: deps/ESPressio-Timing
