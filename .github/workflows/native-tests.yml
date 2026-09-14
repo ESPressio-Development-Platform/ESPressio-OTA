@@ -43,6 +43,16 @@ jobs:
           path: deps/ESPressio-Primitive
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-Units
+          ref: primitives_redesign
+          path: deps/ESPressio-Units
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Observable
+          ref: primitives_redesign
+          path: deps/ESPressio-Observable
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-Timing
           ref: primitives_redesign
           path: deps/ESPressio-Timing
