@@ -8,6 +8,7 @@
 #include "ESPressio_Verification.hpp"
 
 #include "ESPressio_BoundedContainers.hpp"
+#include "ESPressio_BoundedDeserializer.hpp"
 #include "ESPressio_DirectBinaryArchive.hpp"
 #include "ESPressio_SerializableBase.hpp"
 #include "ESPressio_SerializationMacros.hpp"
@@ -121,13 +122,13 @@ TargetProfileFingerprintStatus ComputeUpdateTargetProfileFingerprint(
     if (!digest.Begin(Security::DigestAlgorithm::SHA256)) {
         return TargetProfileFingerprintStatus::DigestFailed;
     }
-    if (!digest.Update({encoded.data(), serialized.Bytes})) {
+    if (!digest.Update(Security::ByteView{encoded.data(), serialized.Bytes})) {
         return TargetProfileFingerprintStatus::DigestFailed;
     }
 
     std::array<std::uint8_t, 32> bytes{};
     std::size_t written = 0U;
-    if (!digest.Finalize({bytes.data(), bytes.size()}, written) || written != bytes.size()) {
+    if (!digest.Finalize(Security::MutableByteView{bytes.data(), bytes.size()}, written) || written != bytes.size()) {
         return TargetProfileFingerprintStatus::DigestFailed;
     }
 
