@@ -42,3 +42,8 @@ add_executable(espressio_ota_durable_test ota_durable_test.cpp)
 target_link_libraries(espressio_ota_durable_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_durable_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
 add_test(NAME espressio_ota_durable_test COMMAND espressio_ota_durable_test)
+
+add_executable(espressio_ota_state_test ota_state_test.cpp)
+target_link_libraries(espressio_ota_state_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_state_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
+add_test(NAME espressio_ota_state_test COMMAND espressio_ota_state_test)
