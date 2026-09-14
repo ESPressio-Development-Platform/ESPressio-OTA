@@ -16,10 +16,13 @@ Timing::QualifiedTime CapturedTime() {
 bool InstallIdentity() {
     System::DeviceIdentifier::Storage bytes{};
     bytes[0] = 0x42U;
-    const auto status = System::RuntimeIdentity::Install(
-        {System::DeviceIdentifier{bytes}, System::RuntimeIncarnationId{1U}});
-    return status == System::RuntimeIdentity::InstallationStatus::Success ||
-           status == System::RuntimeIdentity::InstallationStatus::AlreadyInstalledSameValue;
+    const System::DeviceRuntimeIdentity expected{
+        System::DeviceIdentifier{bytes}, System::RuntimeIncarnationId{1U}};
+    const auto status = System::RuntimeIdentity::Install(expected);
+    if (status == System::RuntimeIdentity::InstallationStatus::Success) return true;
+    if (status != System::RuntimeIdentity::InstallationStatus::AlreadyInstalled) return false;
+    System::DeviceRuntimeIdentity installed{};
+    return System::RuntimeIdentity::TryRead(installed) && installed == expected;
 }
 
 } // namespace
