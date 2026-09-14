@@ -192,7 +192,8 @@ int main() {
     for (std::size_t i = 0U; i < firstSize; ++i) if (firstBytes[i] != secondBytes[i]) return 9;
 
     TestManifest restored;
-    const auto decoded = ESPressio::Serializable::DeserializeBoundedDirectBinary(firstBytes.data(), firstSize, restored);
+    const auto decoded = ESPressio::Serializable::DeserializeBoundedDirectBinaryIntoScratch(
+        firstBytes.data(), firstSize, restored);
     if (!decoded || ValidateManifest(restored) != ManifestStatus::Success) return 10;
     if (restored.SecurityGeneration != 0U || restored.ReleaseChannel != 0U) return 11;
 
@@ -223,17 +224,18 @@ int main() {
         !envelope.Signatures.push_back(signature)) return 18;
     if (ValidateSignedManifestEnvelope(envelope) != ManifestStatus::Success) return 19;
 
-    std::array<std::uint8_t, Capacity::MaximumManifestBytes> envelopeBytes{};
-    const auto encodedEnvelope = ESPressio::Serializable::SerializeDirectBinary(
-        envelope, envelopeBytes.data(), envelopeBytes.size());
-    if (!encodedEnvelope || encodedEnvelope.Bytes > Capacity::MaximumManifestBytes) return 20;
+    ManifestWireWorkspace<Capacity> workspace;
+    std::size_t encodedEnvelopeBytes = 0U;
+    if (SerializeSignedManifest(
+            envelope, workspace.Bytes.data(), workspace.Bytes.size(), encodedEnvelopeBytes) != ManifestStatus::Success ||
+        encodedEnvelopeBytes > Capacity::MaximumManifestBytes) return 20;
 
     FakeAnchorProvider anchors;
     FakePolicy policy;
     FakeSignatureVerifier validVerifier{true};
-    if (VerifySignedManifest(envelope, validVerifier, anchors, policy) != ManifestStatus::Success) return 21;
+    if (VerifySignedManifestWithWorkspace(envelope, validVerifier, anchors, policy, workspace) != ManifestStatus::Success) return 21;
     FakeSignatureVerifier invalidVerifier{false};
-    if (VerifySignedManifest(envelope, invalidVerifier, anchors, policy) != ManifestStatus::NoTrustedSignature) return 22;
+    if (VerifySignedManifestWithWorkspace(envelope, invalidVerifier, anchors, policy, workspace) != ManifestStatus::NoTrustedSignature) return 22;
 
     TestSignedManifest mismatch = envelope;
     mismatch.Signatures.clear();
