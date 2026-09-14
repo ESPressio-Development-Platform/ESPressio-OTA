@@ -100,6 +100,14 @@ bool HasAdjacentDuplicate(const TVector& values, TEqual equal) noexcept {
     return false;
 }
 
+template<class TVector, class TLess>
+bool IsStrictlySorted(const TVector& values, TLess less) noexcept {
+    for (std::size_t i = 1U; i < values.size(); ++i) {
+        if (!less(values[i - 1U], values[i])) return false;
+    }
+    return true;
+}
+
 } // namespace ManifestDetail
 
 template<typename TCapacityProfile>
@@ -244,7 +252,7 @@ struct Manifest final
     std::array<std::uint8_t, 16> Identifier{};
     std::uint64_t Release{0U};
     std::uint32_t ReleaseChannel{0U};
-    std::uint64_t SecurityLevel{0U};
+    std::uint64_t SecurityGeneration{0U};
     std::uint16_t RequiredOTAProtocol{OTAProtocolV1.Value()};
     std::uint64_t RequiredOTAFeatures{0U};
 
@@ -269,7 +277,7 @@ struct Manifest final
         ESPRESSIO_PROPERTY_REQUIRED("identifier", Identifier),
         ESPRESSIO_PROPERTY_REQUIRED("release", Release),
         ESPRESSIO_PROPERTY_REQUIRED("releaseChannel", ReleaseChannel),
-        ESPRESSIO_PROPERTY_REQUIRED("securityLevel", SecurityLevel),
+        ESPRESSIO_PROPERTY_REQUIRED("securityGeneration", SecurityGeneration),
         ESPRESSIO_PROPERTY_REQUIRED("requiredOTAProtocol", RequiredOTAProtocol),
         ESPRESSIO_PROPERTY_REQUIRED("requiredOTAFeatures", RequiredOTAFeatures),
         ESPRESSIO_PROPERTY_REQUIRED("targetClauses", TargetClauses),
@@ -307,43 +315,55 @@ struct SignedManifest final
 
 template<typename TCapacityProfile>
 bool ManifestTargetClauseValid(const ManifestTargetClause<TCapacityProfile>& clause) noexcept {
-    using Detail = ManifestDetail;
-    if (!Detail::MatchModeValid(clause.ProductTypeMode) ||
-        !Detail::MatchModeValid(clause.HardwareFamilyMode) ||
-        !Detail::RevisionModeValid(clause.HardwareRevisionMode) ||
-        !Detail::MatchModeValid(clause.ArchitectureMode) ||
-        !Detail::MatchModeValid(clause.SoftwareVariantMode) ||
-        !Detail::MatchModeValid(clause.CurrentStorageLayoutMode) ||
-        !Detail::MatchModeValid(clause.TargetStorageLayoutMode) ||
-        !Detail::MatchModeValid(clause.CurrentPersistenceSchemaMode) ||
-        !Detail::MatchModeValid(clause.TargetPersistenceSchemaMode)) return false;
+    if (!ManifestDetail::MatchModeValid(clause.ProductTypeMode) ||
+        !ManifestDetail::MatchModeValid(clause.HardwareFamilyMode) ||
+        !ManifestDetail::RevisionModeValid(clause.HardwareRevisionMode) ||
+        !ManifestDetail::MatchModeValid(clause.ArchitectureMode) ||
+        !ManifestDetail::MatchModeValid(clause.SoftwareVariantMode) ||
+        !ManifestDetail::MatchModeValid(clause.CurrentStorageLayoutMode) ||
+        !ManifestDetail::MatchModeValid(clause.TargetStorageLayoutMode) ||
+        !ManifestDetail::MatchModeValid(clause.CurrentPersistenceSchemaMode) ||
+        !ManifestDetail::MatchModeValid(clause.TargetPersistenceSchemaMode)) return false;
 
     const auto exact = [](std::uint8_t mode) noexcept {
         return mode == static_cast<std::uint8_t>(TargetMatchMode::Exact);
     };
-    if (exact(clause.ProductTypeMode) && clause.ProductType == 0U) return false;
-    if (exact(clause.HardwareFamilyMode) && clause.HardwareFamily == 0U) return false;
-    if (exact(clause.ArchitectureMode) && clause.Architecture == 0U) return false;
-    if (exact(clause.SoftwareVariantMode) && clause.SoftwareVariant == 0U) return false;
-    if (exact(clause.CurrentStorageLayoutMode) &&
-        (clause.CurrentStorageLayout == 0U || clause.CurrentStorageLayoutGeneration == 0U)) return false;
-    if (exact(clause.TargetStorageLayoutMode) &&
-        (clause.TargetStorageLayout == 0U || clause.TargetStorageLayoutGeneration == 0U)) return false;
-    if (exact(clause.CurrentPersistenceSchemaMode) &&
-        (clause.CurrentPersistenceSchema == 0U || clause.CurrentPersistenceSchemaGeneration == 0U)) return false;
-    if (exact(clause.TargetPersistenceSchemaMode) &&
-        (clause.TargetPersistenceSchema == 0U || clause.TargetPersistenceSchemaGeneration == 0U)) return false;
+    const auto any = [](std::uint8_t mode) noexcept {
+        return mode == static_cast<std::uint8_t>(TargetMatchMode::Any);
+    };
+
+    if ((exact(clause.ProductTypeMode) && clause.ProductType == 0U) ||
+        (any(clause.ProductTypeMode) && clause.ProductType != 0U)) return false;
+    if ((exact(clause.HardwareFamilyMode) && clause.HardwareFamily == 0U) ||
+        (any(clause.HardwareFamilyMode) && clause.HardwareFamily != 0U)) return false;
+    if ((exact(clause.ArchitectureMode) && clause.Architecture == 0U) ||
+        (any(clause.ArchitectureMode) && clause.Architecture != 0U)) return false;
+    if ((exact(clause.SoftwareVariantMode) && clause.SoftwareVariant == 0U) ||
+        (any(clause.SoftwareVariantMode) && clause.SoftwareVariant != 0U)) return false;
+
+    if (exact(clause.CurrentStorageLayoutMode)) {
+        if (clause.CurrentStorageLayout == 0U || clause.CurrentStorageLayoutGeneration == 0U) return false;
+    } else if (clause.CurrentStorageLayout != 0U || clause.CurrentStorageLayoutGeneration != 0U) return false;
+    if (exact(clause.TargetStorageLayoutMode)) {
+        if (clause.TargetStorageLayout == 0U || clause.TargetStorageLayoutGeneration == 0U) return false;
+    } else if (clause.TargetStorageLayout != 0U || clause.TargetStorageLayoutGeneration != 0U) return false;
+    if (exact(clause.CurrentPersistenceSchemaMode)) {
+        if (clause.CurrentPersistenceSchema == 0U || clause.CurrentPersistenceSchemaGeneration == 0U) return false;
+    } else if (clause.CurrentPersistenceSchema != 0U || clause.CurrentPersistenceSchemaGeneration != 0U) return false;
+    if (exact(clause.TargetPersistenceSchemaMode)) {
+        if (clause.TargetPersistenceSchema == 0U || clause.TargetPersistenceSchemaGeneration == 0U) return false;
+    } else if (clause.TargetPersistenceSchema != 0U || clause.TargetPersistenceSchemaGeneration != 0U) return false;
 
     const auto revisionMode = static_cast<TargetRevisionMode>(clause.HardwareRevisionMode);
+    if (revisionMode == TargetRevisionMode::Any &&
+        (clause.HardwareRevisionMinimum != 0U || clause.HardwareRevisionMaximum != 0U)) return false;
     if (revisionMode == TargetRevisionMode::Exact &&
         (clause.HardwareRevisionMinimum == 0U || clause.HardwareRevisionMinimum != clause.HardwareRevisionMaximum)) return false;
     if (revisionMode == TargetRevisionMode::InclusiveRange &&
         (clause.HardwareRevisionMinimum == 0U || clause.HardwareRevisionMaximum == 0U ||
          clause.HardwareRevisionMinimum > clause.HardwareRevisionMaximum)) return false;
 
-    for (std::size_t i = 0U; i < clause.RequiredComponentTypes.size(); ++i) {
-        if (clause.RequiredComponentTypes[i] == 0U) return false;
-    }
+    for (const auto componentType : clause.RequiredComponentTypes) if (componentType == 0U) return false;
     return true;
 }
 
@@ -351,8 +371,7 @@ template<typename TCapacityProfile>
 ManifestStatus CanonicalizeManifest(Manifest<TCapacityProfile>& manifest) noexcept {
     using namespace ManifestDetail;
 
-    for (std::size_t i = 0U; i < manifest.TargetClauses.size(); ++i) {
-        auto& clause = manifest.TargetClauses[i];
+    for (auto& clause : manifest.TargetClauses) {
         if (!ManifestTargetClauseValid(clause)) return ManifestStatus::Invalid;
         InsertionSort(clause.RequiredComponentTypes,
             [](std::uint64_t left, std::uint64_t right) noexcept { return left < right; });
@@ -362,8 +381,7 @@ ManifestStatus CanonicalizeManifest(Manifest<TCapacityProfile>& manifest) noexce
         }
     }
 
-    for (std::size_t i = 0U; i < manifest.Components.size(); ++i) {
-        auto& component = manifest.Components[i];
+    for (auto& component : manifest.Components) {
         if (component.Identifier == 0U || component.TypeId == 0U || component.ParameterSchemaVersion == 0U) {
             return ManifestStatus::Invalid;
         }
@@ -376,8 +394,7 @@ ManifestStatus CanonicalizeManifest(Manifest<TCapacityProfile>& manifest) noexce
         for (const auto& artifact : component.Artifacts) if (!NonZero128(artifact)) return ManifestStatus::Invalid;
     }
 
-    for (std::size_t i = 0U; i < manifest.Artifacts.size(); ++i) {
-        const auto& artifact = manifest.Artifacts[i];
+    for (const auto& artifact : manifest.Artifacts) {
         if (!NonZero128(artifact.Identifier) || artifact.DigestAlgorithm == 0U || artifact.Digest.empty()) {
             return ManifestStatus::Invalid;
         }
@@ -439,10 +456,47 @@ ManifestStatus ValidateManifest(const Manifest<TCapacityProfile>& manifest) noex
         return ManifestStatus::Invalid;
     }
 
-    for (const auto& clause : manifest.TargetClauses) if (!ManifestTargetClauseValid(clause)) return ManifestStatus::Invalid;
-    for (const auto& condition : manifest.RequiredHealthConditions) if (condition == 0U) return ManifestStatus::Invalid;
+    for (const auto& clause : manifest.TargetClauses) {
+        if (!ManifestTargetClauseValid(clause)) return ManifestStatus::Invalid;
+        if (!IsStrictlySorted(clause.RequiredComponentTypes,
+                [](std::uint64_t left, std::uint64_t right) noexcept { return left < right; })) {
+            return ManifestStatus::NonCanonical;
+        }
+    }
+
+    if (!IsStrictlySorted(manifest.Components,
+            [](const auto& left, const auto& right) noexcept { return left.Identifier < right.Identifier; })) {
+        return ManifestStatus::NonCanonical;
+    }
+    if (!IsStrictlySorted(manifest.Artifacts,
+            [](const auto& left, const auto& right) noexcept { return Less128(left.Identifier, right.Identifier); })) {
+        return ManifestStatus::NonCanonical;
+    }
+    if (!IsStrictlySorted(manifest.Dependencies,
+            [](const auto& left, const auto& right) noexcept {
+                return left.Component < right.Component ||
+                       (left.Component == right.Component && left.DependsOn < right.DependsOn);
+            })) return ManifestStatus::NonCanonical;
+    if (!IsStrictlySorted(manifest.RequiredHealthConditions,
+            [](std::uint64_t left, std::uint64_t right) noexcept { return left < right; })) {
+        return ManifestStatus::NonCanonical;
+    }
+    if (!IsStrictlySorted(manifest.SignatureDescriptors,
+            [](const auto& left, const auto& right) noexcept {
+                if (left.Algorithm != right.Algorithm) return left.Algorithm < right.Algorithm;
+                if (left.TrustAnchor != right.TrustAnchor) return left.TrustAnchor < right.TrustAnchor;
+                return left.TrustPolicy < right.TrustPolicy;
+            })) return ManifestStatus::NonCanonical;
+
+    for (const auto condition : manifest.RequiredHealthConditions) if (condition == 0U) return ManifestStatus::Invalid;
     for (const auto& descriptor : manifest.SignatureDescriptors) {
         if (descriptor.Algorithm == 0U || descriptor.TrustAnchor == 0U || descriptor.TrustPolicy == 0U) {
+            return ManifestStatus::Invalid;
+        }
+    }
+
+    for (const auto& artifact : manifest.Artifacts) {
+        if (!NonZero128(artifact.Identifier) || artifact.DigestAlgorithm == 0U || artifact.Digest.empty()) {
             return ManifestStatus::Invalid;
         }
     }
@@ -451,7 +505,12 @@ ManifestStatus ValidateManifest(const Manifest<TCapacityProfile>& manifest) noex
         if (component.Identifier == 0U || component.TypeId == 0U || component.ParameterSchemaVersion == 0U) {
             return ManifestStatus::Invalid;
         }
+        if (!IsStrictlySorted(component.Artifacts,
+                [](const auto& left, const auto& right) noexcept { return Less128(left, right); })) {
+            return ManifestStatus::NonCanonical;
+        }
         for (const auto& referenced : component.Artifacts) {
+            if (!NonZero128(referenced)) return ManifestStatus::Invalid;
             bool found = false;
             for (const auto& artifact : manifest.Artifacts) {
                 if (Equal128(referenced, artifact.Identifier)) { found = true; break; }
@@ -473,7 +532,6 @@ ManifestStatus ValidateManifest(const Manifest<TCapacityProfile>& manifest) noex
         if (!componentFound || !dependencyFound) return ManifestStatus::MissingReference;
     }
 
-    // Bounded Kahn-style cycle detection without allocation.
     std::array<std::uint16_t, TCapacityProfile::MaximumComponents> indegree{};
     std::array<bool, TCapacityProfile::MaximumComponents> consumed{};
     for (const auto& edge : manifest.Dependencies) {
@@ -522,7 +580,8 @@ ManifestStatus SerializeCanonicalManifest(
     std::size_t capacity,
     std::size_t& written) noexcept {
     written = 0U;
-    if (ValidateManifest(manifest) != ManifestStatus::Success) return ManifestStatus::Invalid;
+    const auto valid = ValidateManifest(manifest);
+    if (valid != ManifestStatus::Success) return valid;
     const auto encoded = Serializable::SerializeDirectBinary(manifest, output, capacity);
     if (!encoded) return encoded.Error == Serializable::SerializationErrorCode::ResourceLimitExceeded
         ? ManifestStatus::CapacityUnavailable
