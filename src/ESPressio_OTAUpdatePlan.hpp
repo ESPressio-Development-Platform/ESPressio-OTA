@@ -83,7 +83,11 @@ UpdatePlanStatus BuildUpdatePlan(
     const Manifest<TCapacityProfile>& manifest,
     const ComponentHandlerDirectory<TCapacityProfile>& handlers,
     UpdatePlan<TCapacityProfile>& output) noexcept {
-    if (ValidateManifest(manifest) != ManifestStatus::Success) {
+    const auto manifestStatus = ValidateManifest(manifest);
+    if (manifestStatus == ManifestStatus::DependencyCycle) {
+        return UpdatePlanStatus::DependencyCycle;
+    }
+    if (manifestStatus != ManifestStatus::Success) {
         return UpdatePlanStatus::InvalidManifest;
     }
     if (!handlers.IsFrozen()) return UpdatePlanStatus::HandlerDirectoryNotFrozen;
