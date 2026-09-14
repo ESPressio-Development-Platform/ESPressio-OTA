@@ -95,24 +95,42 @@ inline constexpr bool EqualIdentifier(
 }
 
 template<typename TCapacityProfile>
-UpdateOfferStatus SetCompatibilityClaim(
+UpdateOfferStatus ValidateCompatibilityClaimInput(
+    const CompatibilityClaimToken<TCapacityProfile>* token) noexcept {
+    if (token == nullptr || token->IsEmpty()) return UpdateOfferStatus::Success;
+    if (token->TokenSchemaVersion == 0U || token->TokenLength == 0U ||
+        token->TokenLength > TCapacityProfile::MaximumCompatibilityClaimTokenBytes) {
+        return UpdateOfferStatus::Invalid;
+    }
+    return UpdateOfferStatus::Success;
+}
+
+template<typename TCapacityProfile>
+void ResetOffer(UpdateOffer<TCapacityProfile>& offer) noexcept {
+    offer.Kind = static_cast<std::uint8_t>(UpdateOfferKind::ManifestReference);
+    offer.Manifest.fill(0U);
+    offer.CompatibilityClaimSchema = 0U;
+    offer.CompatibilityClaim.clear();
+    offer.HasAdvisorySummary = 0U;
+    offer.AdvisorySummary.Release = 0U;
+    offer.AdvisorySummary.ReleaseChannel = 0U;
+    offer.AdvisorySummary.SecurityGeneration = 0U;
+    offer.AdvisorySummary.RequiredOTAProtocol = 0U;
+    offer.AdvisorySummary.RequiredOTAFeatures = 0U;
+    offer.EmbeddedManifest.clear();
+}
+
+template<typename TCapacityProfile>
+void SetCompatibilityClaimValidated(
     UpdateOffer<TCapacityProfile>& offer,
     const CompatibilityClaimToken<TCapacityProfile>* token) noexcept {
     offer.CompatibilityClaim.clear();
     offer.CompatibilityClaimSchema = 0U;
-    if (token == nullptr || token->IsEmpty()) return UpdateOfferStatus::Success;
-    if (token->TokenSchemaVersion == 0U ||
-        token->TokenLength > TCapacityProfile::MaximumCompatibilityClaimTokenBytes) {
-        return UpdateOfferStatus::Invalid;
-    }
+    if (token == nullptr || token->IsEmpty()) return;
     for (std::size_t i = 0U; i < token->TokenLength; ++i) {
-        if (!offer.CompatibilityClaim.push_back(token->TokenBytes[i])) {
-            offer.CompatibilityClaim.clear();
-            return UpdateOfferStatus::CapacityUnavailable;
-        }
+        (void)offer.CompatibilityClaim.push_back(token->TokenBytes[i]);
     }
     offer.CompatibilityClaimSchema = token->TokenSchemaVersion;
-    return UpdateOfferStatus::Success;
 }
 
 template<typename TCapacityProfile>
@@ -121,7 +139,11 @@ void SetAdvisorySummary(
     const UpdateOfferAdvisorySummary* summary) noexcept {
     if (summary == nullptr) {
         offer.HasAdvisorySummary = 0U;
-        offer.AdvisorySummary = {};
+        offer.AdvisorySummary.Release = 0U;
+        offer.AdvisorySummary.ReleaseChannel = 0U;
+        offer.AdvisorySummary.SecurityGeneration = 0U;
+        offer.AdvisorySummary.RequiredOTAProtocol = 0U;
+        offer.AdvisorySummary.RequiredOTAFeatures = 0U;
         return;
     }
     offer.HasAdvisorySummary = 1U;
@@ -138,14 +160,16 @@ UpdateOfferStatus BuildManifestReferenceOffer(
     UpdateOffer<TCapacityProfile>& offer) noexcept {
     if (!manifest) return UpdateOfferStatus::Invalid;
     if (summary != nullptr && !summary->IsValid()) return UpdateOfferStatus::Invalid;
-
-    UpdateOffer<TCapacityProfile> candidate{};
-    candidate.Kind = static_cast<std::uint8_t>(UpdateOfferKind::ManifestReference);
-    candidate.Manifest = manifest.Bytes();
-    const auto claimStatus = UpdateOfferDetail::SetCompatibilityClaim(candidate, claim);
+    const auto claimStatus = UpdateOfferDetail::ValidateCompatibilityClaimInput(claim);
     if (claimStatus != UpdateOfferStatus::Success) return claimStatus;
-    UpdateOfferDetail::SetAdvisorySummary(candidate, summary);
-    offer = candidate;
+
+    // All fallible validation is complete. Populate caller-owned output directly;
+    // no second ~8 KiB UpdateOffer temporary is created on the stack.
+    UpdateOfferDetail::ResetOffer(offer);
+    offer.Kind = static_cast<std::uint8_t>(UpdateOfferKind::ManifestReference);
+    offer.Manifest = manifest.Bytes();
+    UpdateOfferDetail::SetCompatibilityClaimValidated(offer, claim);
+    UpdateOfferDetail::SetAdvisorySummary(offer, summary);
     return UpdateOfferStatus::Success;
 }
 
@@ -154,34 +178,34 @@ UpdateOfferStatus BuildEmbeddedManifestOffer(
     const SignedManifest<TCapacityProfile>& envelope,
     const CompatibilityClaimToken<TCapacityProfile>* claim,
     const UpdateOfferAdvisorySummary* summary,
+    ManifestWireWorkspace<TCapacityProfile>& workspace,
     UpdateOffer<TCapacityProfile>& offer) noexcept {
     if (summary != nullptr && !summary->IsValid()) return UpdateOfferStatus::Invalid;
     const auto valid = ValidateSignedManifestEnvelope(envelope);
     if (valid != ManifestStatus::Success) return UpdateOfferStatus::Invalid;
-
-    UpdateOffer<TCapacityProfile> candidate{};
-    candidate.Kind = static_cast<std::uint8_t>(UpdateOfferKind::EmbeddedSignedManifest);
-    candidate.Manifest = envelope.Content.Identifier;
-    const auto claimStatus = UpdateOfferDetail::SetCompatibilityClaim(candidate, claim);
+    const auto claimStatus = UpdateOfferDetail::ValidateCompatibilityClaimInput(claim);
     if (claimStatus != UpdateOfferStatus::Success) return claimStatus;
-    UpdateOfferDetail::SetAdvisorySummary(candidate, summary);
 
-    std::array<std::uint8_t, TCapacityProfile::MaximumManifestBytes> encoded{};
     std::size_t encodedBytes = 0U;
     const auto encodedStatus = SerializeSignedManifest(
-        envelope, encoded.data(), encoded.size(), encodedBytes);
+        envelope, workspace.Bytes.data(), workspace.Bytes.size(), encodedBytes);
     if (encodedStatus == ManifestStatus::CapacityUnavailable) return UpdateOfferStatus::CapacityUnavailable;
     if (encodedStatus != ManifestStatus::Success) return UpdateOfferStatus::SerializationFailed;
-    for (std::size_t i = 0U; i < encodedBytes; ++i) {
-        if (!candidate.EmbeddedManifest.push_back(encoded[i])) return UpdateOfferStatus::CapacityUnavailable;
-    }
 
-    offer = candidate;
+    // Serialization/validation succeeded. Publish directly into caller-owned output.
+    UpdateOfferDetail::ResetOffer(offer);
+    offer.Kind = static_cast<std::uint8_t>(UpdateOfferKind::EmbeddedSignedManifest);
+    offer.Manifest = envelope.Content.Identifier;
+    UpdateOfferDetail::SetCompatibilityClaimValidated(offer, claim);
+    UpdateOfferDetail::SetAdvisorySummary(offer, summary);
+    for (std::size_t i = 0U; i < encodedBytes; ++i) {
+        (void)offer.EmbeddedManifest.push_back(workspace.Bytes[i]);
+    }
     return UpdateOfferStatus::Success;
 }
 
 template<typename TCapacityProfile>
-UpdateOfferStatus ValidateUpdateOffer(const UpdateOffer<TCapacityProfile>& offer) noexcept {
+UpdateOfferStatus ValidateUpdateOfferStructure(const UpdateOffer<TCapacityProfile>& offer) noexcept {
     if (!UpdateOfferDetail::NonZeroIdentifier(offer.Manifest)) return UpdateOfferStatus::Invalid;
     if (offer.CompatibilityClaim.empty()) {
         if (offer.CompatibilityClaimSchema != 0U) return UpdateOfferStatus::Invalid;
@@ -202,24 +226,47 @@ UpdateOfferStatus ValidateUpdateOffer(const UpdateOffer<TCapacityProfile>& offer
     if (kind == UpdateOfferKind::ManifestReference) {
         return offer.EmbeddedManifest.empty() ? UpdateOfferStatus::Success : UpdateOfferStatus::Invalid;
     }
-    if (kind != UpdateOfferKind::EmbeddedSignedManifest || offer.EmbeddedManifest.empty()) {
+    return kind == UpdateOfferKind::EmbeddedSignedManifest && !offer.EmbeddedManifest.empty()
+        ? UpdateOfferStatus::Success
+        : UpdateOfferStatus::Invalid;
+}
+
+template<typename TCapacityProfile>
+UpdateOfferStatus DecodeEmbeddedManifestOfferIntoScratch(
+    const UpdateOffer<TCapacityProfile>& offer,
+    SignedManifest<TCapacityProfile>& scratch) noexcept {
+    const auto structure = ValidateUpdateOfferStructure(offer);
+    if (structure != UpdateOfferStatus::Success) return structure;
+    if (static_cast<UpdateOfferKind>(offer.Kind) != UpdateOfferKind::EmbeddedSignedManifest) {
         return UpdateOfferStatus::Invalid;
     }
-
-    SignedManifest<TCapacityProfile> embedded{};
-    const auto decoded = DeserializeSignedManifest(
-        offer.EmbeddedManifest.data(), offer.EmbeddedManifest.size(), embedded);
+    const auto decoded = DeserializeSignedManifestIntoScratch(
+        offer.EmbeddedManifest.data(), offer.EmbeddedManifest.size(), scratch);
+    if (decoded == ManifestStatus::CapacityUnavailable) return UpdateOfferStatus::CapacityUnavailable;
     if (decoded != ManifestStatus::Success) return UpdateOfferStatus::SerializationFailed;
-    return UpdateOfferDetail::EqualIdentifier(offer.Manifest, embedded.Content.Identifier)
+    return UpdateOfferDetail::EqualIdentifier(offer.Manifest, scratch.Content.Identifier)
         ? UpdateOfferStatus::Success
         : UpdateOfferStatus::ManifestMismatch;
 }
 
 template<typename TCapacityProfile>
+UpdateOfferStatus ValidateUpdateOffer(
+    const UpdateOffer<TCapacityProfile>& offer,
+    SignedManifest<TCapacityProfile>& scratch) noexcept {
+    const auto structure = ValidateUpdateOfferStructure(offer);
+    if (structure != UpdateOfferStatus::Success) return structure;
+    if (static_cast<UpdateOfferKind>(offer.Kind) == UpdateOfferKind::ManifestReference) {
+        return UpdateOfferStatus::Success;
+    }
+    return DecodeEmbeddedManifestOfferIntoScratch(offer, scratch);
+}
+
+template<typename TCapacityProfile>
 UpdateOfferStatus ValidateUpdateOfferAgainstVerifiedManifest(
     const UpdateOffer<TCapacityProfile>& offer,
-    const Manifest<TCapacityProfile>& verifiedManifest) noexcept {
-    const auto basic = ValidateUpdateOffer(offer);
+    const Manifest<TCapacityProfile>& verifiedManifest,
+    SignedManifest<TCapacityProfile>& scratch) noexcept {
+    const auto basic = ValidateUpdateOffer(offer, scratch);
     if (basic != UpdateOfferStatus::Success) return basic;
     if (!UpdateOfferDetail::EqualIdentifier(offer.Manifest, verifiedManifest.Identifier)) {
         return UpdateOfferStatus::ManifestMismatch;
