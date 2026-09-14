@@ -13,22 +13,6 @@
 
 namespace ESPressio::OTA {
 
-enum class RecoveryPoint : std::uint8_t {
-    None,
-    TransactionCreated,
-    ManifestAccepted,
-    ArtifactsAcquired,
-    ArtifactsVerified,
-    StagingStarted,
-    Staged,
-    ActivationSelected,
-    TrialBootEntered,
-    CommitStarted,
-    Committed,
-    RollbackStarted,
-    RolledBack
-};
-
 enum class DurableIntent : std::uint8_t {
     None,
     ActivationArmed,
@@ -87,6 +71,11 @@ struct ActiveTransactionRecord final {
                bool(Release) && bool(Manifest) && Point != RecoveryPoint::None &&
                Point != RecoveryPoint::Committed && Point != RecoveryPoint::RolledBack;
     }
+
+    constexpr bool IsEmpty() const noexcept {
+        return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
+               CandidateSecurity.Value() == 0U && Point == RecoveryPoint::None;
+    }
 };
 
 template<typename TCapacityProfile>
@@ -115,7 +104,7 @@ struct OTAControlRecord final {
                 Active.CandidateSecurity < MinimumAcceptedSecurity) return false;
             if (!GenerationIdsExhausted && NextGeneration <= Active.CandidateGeneration) return false;
         } else {
-            if (Active.IsValid()) return false;
+            if (!Active.IsEmpty()) return false;
             if (Intent != DurableIntent::None && Intent != DurableIntent::RecoveryRequired) return false;
         }
         return true;
@@ -335,6 +324,7 @@ OTADurableStatus DeserializeOTAControlRecord(
 template<typename TCapacityProfile>
 class OTAControlStore final {
     Persistence::IAtomicRecordStore& store_;
+    bool commitAmbiguous_{false};
     inline static constexpr Persistence::AtomicRecordKey Key = [] {
         Persistence::AtomicRecordKey key;
         Persistence::AtomicRecordKey::TryCreate("ota.control.v1", key);
@@ -348,6 +338,11 @@ class OTAControlStore final {
             return OTADurableStatus::UnsupportedBackend;
         }
         return DurableDetail::MapPersistenceStatus(store_.Recover());
+    }
+
+    OTADurableStatus MutationReady() noexcept {
+        if (commitAmbiguous_) return OTADurableStatus::CommitAmbiguous;
+        return Ready();
     }
 
     OTADurableStatus ReadCommitted(OTAControlRecord<TCapacityProfile>& output) noexcept {
@@ -364,7 +359,9 @@ class OTAControlStore final {
         std::size_t written = 0U;
         const auto encoded = SerializeOTAControlRecord(record, bytes.data(), bytes.size(), written);
         if (encoded != OTADurableStatus::Success) return encoded;
-        return DurableDetail::MapPersistenceStatus(store_.ReplaceAtomically(Key, bytes.data(), written));
+        const auto status = DurableDetail::MapPersistenceStatus(store_.ReplaceAtomically(Key, bytes.data(), written));
+        if (status == OTADurableStatus::CommitAmbiguous) commitAmbiguous_ = true;
+        return status;
     }
 
     static void ClearActive(OTAControlRecord<TCapacityProfile>& record) noexcept {
@@ -377,6 +374,7 @@ public:
     explicit OTAControlStore(Persistence::IAtomicRecordStore& store) noexcept : store_(store) {}
 
     static constexpr Persistence::AtomicRecordKey RecordKey() noexcept { return Key; }
+    bool HasAmbiguousCommit() const noexcept { return commitAmbiguous_; }
 
     OTADurableStatus Load(OTAControlRecord<TCapacityProfile>& output) noexcept {
         const auto ready = Ready();
@@ -388,7 +386,7 @@ public:
         const CommittedBaseline& baseline,
         SecurityGeneration minimumAccepted) noexcept {
         if (!baseline.IsValid() || minimumAccepted > baseline.Security) return OTADurableStatus::Invalid;
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
 
         OTAControlRecord<TCapacityProfile> existing;
@@ -417,7 +415,7 @@ public:
         allocated = {};
         if (!release || !manifest) return OTADurableStatus::Invalid;
 
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -457,7 +455,7 @@ public:
 
     OTADurableStatus AdvanceRecoveryPoint(UpdateTransactionId transaction, RecoveryPoint point) noexcept {
         if (!transaction || !DurableDetail::IsForwardRecoveryPoint(point)) return OTADurableStatus::Invalid;
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -472,7 +470,7 @@ public:
     }
 
     OTADurableStatus ArmActivation(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -488,7 +486,7 @@ public:
     }
 
     OTADurableStatus MarkTrialEntered(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -504,7 +502,7 @@ public:
     }
 
     OTADurableStatus PersistCommitIntent(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -522,7 +520,7 @@ public:
     }
 
     OTADurableStatus FinalizeCommit(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -547,7 +545,7 @@ public:
     }
 
     OTADurableStatus PersistRollbackIntent(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -561,7 +559,7 @@ public:
     }
 
     OTADurableStatus FinalizeRollback(UpdateTransactionId transaction) noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
@@ -576,7 +574,7 @@ public:
     }
 
     OTADurableStatus MarkRecoveryRequired() noexcept {
-        const auto ready = Ready();
+        const auto ready = MutationReady();
         if (ready != OTADurableStatus::Success) return ready;
         OTAControlRecord<TCapacityProfile> record;
         auto status = ReadCommitted(record);
