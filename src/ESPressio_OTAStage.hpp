@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "ESPressio_OTACapacityProfile.hpp"
+#include "ESPressio_OTAComponent.hpp"
 #include "ESPressio_OTATypes.hpp"
 
 namespace ESPressio::OTA {
