@@ -27,3 +27,13 @@ add_executable(espressio_ota_catalog_test ota_catalog_test.cpp)
 target_link_libraries(espressio_ota_catalog_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_catalog_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
 add_test(NAME espressio_ota_catalog_test COMMAND espressio_ota_catalog_test)
+
+add_executable(espressio_ota_component_handler_test ota_component_handler_test.cpp)
+target_link_libraries(espressio_ota_component_handler_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_component_handler_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
+add_test(NAME espressio_ota_component_handler_test COMMAND espressio_ota_component_handler_test)
+
+add_executable(espressio_ota_update_plan_test ota_update_plan_test.cpp)
+target_link_libraries(espressio_ota_update_plan_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_update_plan_test PRIVATE -Wall -Wextra -Werror -pedantic -fno-rtti -fno-exceptions)
+add_test(NAME espressio_ota_update_plan_test COMMAND espressio_ota_update_plan_test)
