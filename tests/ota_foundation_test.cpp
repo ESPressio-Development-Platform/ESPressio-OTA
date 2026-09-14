@@ -83,6 +83,8 @@ public:
 
 using TestProfile = UpdateTargetProfile<ConstrainedV1CapacityProfile>;
 using TestProfileWire = UpdateTargetProfileCanonicalWire<ConstrainedV1CapacityProfile>;
+using TestClaim = CandidateCompatibilityClaim<ConstrainedV1CapacityProfile>;
+using TestClaimToken = CompatibilityClaimToken<ConstrainedV1CapacityProfile>;
 
 bool ConfigureProfile(TestProfile& profile, bool reverseComponentOrder) {
     if (profile.SetSystemIdentity(
@@ -103,6 +105,20 @@ bool ConfigureProfile(TestProfile& profile, bool reverseComponentOrder) {
     const ComponentTypeId second{reverseComponentOrder ? 0x1001U : 0x1002U};
     return profile.AddSupportedComponentType(first) == TargetProfileStatus::Success &&
            profile.AddSupportedComponentType(second) == TargetProfileStatus::Success;
+}
+
+bool ConfigureMatchingClaim(TestClaim& claim) {
+    return claim.SetProductType(ESPressio::System::ProductTypeIdentifier{11U}) == CompatibilityClaimStatus::Success &&
+           claim.SetHardwareFamilyExact(ESPressio::System::HardwareFamilyIdentifier{22U}) == CompatibilityClaimStatus::Success &&
+           claim.SetHardwareRevisionRange(ESPressio::System::HardwareRevision{2U}, ESPressio::System::HardwareRevision{4U}) == CompatibilityClaimStatus::Success &&
+           claim.SetArchitectureExact(ESPressio::System::ArchitectureIdentifier{44U}) == CompatibilityClaimStatus::Success &&
+           claim.SetSoftwareVariantExact(ESPressio::System::SoftwareVariantIdentifier{55U}) == CompatibilityClaimStatus::Success &&
+           claim.SetCurrentStorageLayoutExact(ESPressio::Platform::OTA::StorageLayoutIdentifier{66U}, ESPressio::Platform::OTA::StorageLayoutGeneration{2U}) == CompatibilityClaimStatus::Success &&
+           claim.SetCurrentPersistenceSchemaExact(ESPressio::Persistence::SchemaIdentifier{77U}, ESPressio::Persistence::SchemaGeneration{4U}) == CompatibilityClaimStatus::Success &&
+           claim.SetMinimumProfileSchema(UpdateTargetProfileSchemaV1) == CompatibilityClaimStatus::Success &&
+           claim.SetMinimumOTAProtocol(OTAProtocolV1) == CompatibilityClaimStatus::Success &&
+           (claim.SetRequiredFeatures(0x1U), true) &&
+           claim.AddRequiredComponentType(ComponentTypeId{0x1001U}) == CompatibilityClaimStatus::Success;
 }
 
 static_assert(sizeof(ComponentTypeId) == 8U);
@@ -189,6 +205,35 @@ int main() {
         restored.SupportedComponentTypes.size() != 2U ||
         restored.SupportedComponentTypes[0] != 0x1001U ||
         restored.SupportedComponentTypes[1] != 0x1002U) return 25;
+
+    TestClaimToken deviceToken;
+    if (BuildDeviceCompatibilityClaimToken(profileA, deviceToken) != CompatibilityClaimStatus::Success) return 26;
+    if (deviceToken.TokenLength != 121U || deviceToken.TokenLength > ConstrainedV1CapacityProfile::MaximumCompatibilityClaimTokenBytes) return 27;
+
+    TestClaim matchingClaim;
+    if (!ConfigureMatchingClaim(matchingClaim)) return 28;
+    TestClaimToken candidateToken;
+    if (BuildCandidateCompatibilityClaimToken(matchingClaim, candidateToken) != CompatibilityClaimStatus::Success) return 29;
+    if (candidateToken.TokenLength != 96U) return 30;
+    if (EvaluateCompatibilityClaimTokens(deviceToken, candidateToken) != CompatibilityResult::PossiblyCompatible) return 31;
+
+    TestClaim missingFeatureClaim;
+    if (!ConfigureMatchingClaim(missingFeatureClaim)) return 32;
+    missingFeatureClaim.SetRequiredFeatures(0x8U);
+    TestClaimToken missingFeatureToken;
+    if (BuildCandidateCompatibilityClaimToken(missingFeatureClaim, missingFeatureToken) != CompatibilityClaimStatus::Success) return 33;
+    if (EvaluateCompatibilityClaimTokens(deviceToken, missingFeatureToken) != CompatibilityResult::DefinitelyIncompatible) return 34;
+
+    TestClaim wrongProductClaim;
+    if (!ConfigureMatchingClaim(wrongProductClaim)) return 35;
+    if (wrongProductClaim.SetProductType(ESPressio::System::ProductTypeIdentifier{99U}) != CompatibilityClaimStatus::Success) return 36;
+    TestClaimToken wrongProductToken;
+    if (BuildCandidateCompatibilityClaimToken(wrongProductClaim, wrongProductToken) != CompatibilityClaimStatus::Success) return 37;
+    if (EvaluateCompatibilityClaimTokens(deviceToken, wrongProductToken) != CompatibilityResult::DefinitelyIncompatible) return 38;
+
+    TestClaimToken unknownSchemaToken = candidateToken;
+    unknownSchemaToken.TokenSchemaVersion = 2U;
+    if (EvaluateCompatibilityClaimTokens(deviceToken, unknownSchemaToken) != CompatibilityResult::Unknown) return 39;
 
     return 0;
 }
