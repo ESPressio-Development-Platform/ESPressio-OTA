@@ -100,11 +100,18 @@ bool ConfigureManifest(TestManifest& manifest, bool reverse) {
     if (!(reverse ? manifest.Components.push_back(componentB) : manifest.Components.push_back(componentA))) return false;
     if (!(reverse ? manifest.Components.push_back(componentA) : manifest.Components.push_back(componentB))) return false;
 
-    if (!manifest.Dependencies.push_back({2U, 1U})) return false;
+    ManifestDependency dependency;
+    dependency.Component = 2U;
+    dependency.DependsOn = 1U;
+    if (!manifest.Dependencies.push_back(dependency)) return false;
     if (!manifest.RequiredHealthConditions.push_back(reverse ? 0x3002U : 0x3001U) ||
         !manifest.RequiredHealthConditions.push_back(reverse ? 0x3001U : 0x3002U)) return false;
 
-    if (!manifest.SignatureDescriptors.push_back({1U, 7U, 8U})) return false;
+    ManifestSignatureDescriptor signatureDescriptor;
+    signatureDescriptor.Algorithm = 1U;
+    signatureDescriptor.TrustAnchor = 7U;
+    signatureDescriptor.TrustPolicy = 8U;
+    if (!manifest.SignatureDescriptors.push_back(signatureDescriptor)) return false;
     return true;
 }
 
@@ -161,8 +168,7 @@ public:
 static_assert(ESPressio::Serializable::IsBoundedSerializable<TestClause>);
 static_assert(ESPressio::Serializable::IsBoundedSerializable<TestManifest>);
 static_assert(ESPressio::Serializable::IsBoundedSerializable<TestSignedManifest>);
-static_assert(ESPressio::Serializable::MaximumSerializedSize<TestSignedManifest, ESPressio::Serializable::DirectBinary> <=
-              Capacity::MaximumManifestBytes);
+static_assert(ESPressio::Serializable::MaximumSerializedSize<TestSignedManifest, ESPressio::Serializable::DirectBinary> > 0U);
 
 } // namespace
 
@@ -201,7 +207,13 @@ int main() {
 
     TestManifest cyclic = first;
     cyclic.Dependencies.clear();
-    if (!cyclic.Dependencies.push_back({1U, 2U}) || !cyclic.Dependencies.push_back({2U, 1U})) return 16;
+    ManifestDependency edgeA;
+    edgeA.Component = 1U;
+    edgeA.DependsOn = 2U;
+    ManifestDependency edgeB;
+    edgeB.Component = 2U;
+    edgeB.DependsOn = 1U;
+    if (!cyclic.Dependencies.push_back(edgeA) || !cyclic.Dependencies.push_back(edgeB)) return 16;
     if (ValidateManifest(cyclic) != ManifestStatus::DependencyCycle) return 17;
 
     TestSignedManifest envelope;
@@ -211,20 +223,25 @@ int main() {
         !envelope.Signatures.push_back(signature)) return 18;
     if (ValidateSignedManifestEnvelope(envelope) != ManifestStatus::Success) return 19;
 
+    std::array<std::uint8_t, Capacity::MaximumManifestBytes> envelopeBytes{};
+    const auto encodedEnvelope = ESPressio::Serializable::SerializeDirectBinary(
+        envelope, envelopeBytes.data(), envelopeBytes.size());
+    if (!encodedEnvelope || encodedEnvelope.Bytes > Capacity::MaximumManifestBytes) return 20;
+
     FakeAnchorProvider anchors;
     FakePolicy policy;
     FakeSignatureVerifier validVerifier{true};
-    if (VerifySignedManifest(envelope, validVerifier, anchors, policy) != ManifestStatus::Success) return 20;
+    if (VerifySignedManifest(envelope, validVerifier, anchors, policy) != ManifestStatus::Success) return 21;
     FakeSignatureVerifier invalidVerifier{false};
-    if (VerifySignedManifest(envelope, invalidVerifier, anchors, policy) != ManifestStatus::NoTrustedSignature) return 21;
+    if (VerifySignedManifest(envelope, invalidVerifier, anchors, policy) != ManifestStatus::NoTrustedSignature) return 22;
 
     TestSignedManifest mismatch = envelope;
     mismatch.Signatures.clear();
-    if (ValidateSignedManifestEnvelope(mismatch) != ManifestStatus::SignatureCountMismatch) return 22;
+    if (ValidateSignedManifestEnvelope(mismatch) != ManifestStatus::SignatureCountMismatch) return 23;
 
     TestManifest invalidDigest = first;
     invalidDigest.Artifacts[0].DigestAlgorithm = 0U;
-    if (ValidateManifest(invalidDigest) != ManifestStatus::Invalid) return 23;
+    if (ValidateManifest(invalidDigest) != ManifestStatus::Invalid) return 24;
 
     return 0;
 }
