@@ -5,12 +5,12 @@
 
 using namespace ESPressio::OTA;
 
-namespace {
-
 struct ApplicationFirmwareComponent {};
 
+namespace ESPressio::OTA {
+
 template<>
-struct ESPressio::OTA::ComponentTypeTraits<ApplicationFirmwareComponent> {
+struct ComponentTypeTraits<::ApplicationFirmwareComponent> {
     static constexpr ComponentTypeDescriptor Describe() noexcept {
         return {
             ComponentTypeId{0x1001U},
@@ -21,6 +21,10 @@ struct ESPressio::OTA::ComponentTypeTraits<ApplicationFirmwareComponent> {
         };
     }
 };
+
+} // namespace ESPressio::OTA
+
+namespace {
 
 static_assert(sizeof(ComponentTypeId) == 8U);
 static_assert(sizeof(ArtifactIdentifier) == 16U);
