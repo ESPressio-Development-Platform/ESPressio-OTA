@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdint>
 
 #include "ESPressio_OTA.hpp"
@@ -51,7 +52,6 @@ public:
 };
 
 void AddRequiredManifestScaffolding(Manifest<Capacity>& manifest) {
-    manifest.Identifier.Bytes();
     std::array<std::uint8_t, 16> id{};
     id[15] = 1U;
     manifest.Identifier = id;
