@@ -7,3 +7,4 @@
 #include "ESPressio_OTAProfile.hpp"
 #include "ESPressio_OTAProfileWire.hpp"
 #include "ESPressio_OTACompatibilityClaim.hpp"
+#include "ESPressio_OTAManifest.hpp"
