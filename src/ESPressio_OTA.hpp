@@ -11,3 +11,5 @@
 #include "ESPressio_OTAManifest.hpp"
 #include "ESPressio_OTAManifestWire.hpp"
 #include "ESPressio_OTAOffer.hpp"
+#include "ESPressio_OTAProviders.hpp"
+#include "ESPressio_OTACheckpoint.hpp"
