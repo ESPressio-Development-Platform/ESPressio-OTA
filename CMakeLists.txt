@@ -11,7 +11,7 @@ add_library(ESPressio::OTA ALIAS ESPressio-OTA)
 # Optional source-tree hints used by native contract tests and super-projects.
 # Package managers may instead supply these libraries through their normal
 # dependency mechanism; the OTA public headers only consume their semantic APIs.
-foreach(dependency System Platform Persistence Security Serializable Primitive Units Observable Threads Timing State)
+foreach(dependency System Platform Persistence Security Serializable Primitive Units Observable Task Threads Timing State)
     set(variable "ESPRESSIO_${dependency}_SOURCE_DIR")
     if(DEFINED ${variable} AND EXISTS "${${variable}}/src")
         target_include_directories(ESPressio-OTA INTERFACE "${${variable}}/src")
