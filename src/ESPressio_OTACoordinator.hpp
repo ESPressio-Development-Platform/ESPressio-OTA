@@ -12,6 +12,7 @@
 #include "ESPressio_OTAUpdatePlan.hpp"
 #include "ESPressio_OTAPolicyHealth.hpp"
 #include "ESPressio_OTAExecution.hpp"
+#include "ESPressio_OTAComponentLifecycleExecution.hpp"
 #include "ESPressio_OTAState.hpp"
 
 #include <ESPressio_PlatformClock.hpp>
@@ -239,6 +240,7 @@ class Coordinator final {
     ArtifactAcquisitionSession<TCapacityProfile> acquisition_;
     ArtifactVerificationSession<TCapacityProfile> verification_;
     ComponentStagingSession<TCapacityProfile> staging_;
+    ComponentLifecycleExecutionSession<TCapacityProfile> componentLifecycle_;
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -263,6 +265,8 @@ class Coordinator final {
     Platform::Clock::Tick trialStartTick_{0U};
     Platform::Clock::Tick lastHealthEvaluationTick_{0U};
     bool healthEvaluated_{false};
+    bool activationRestartIssued_{false};
+    bool rollbackRestartIssued_{false};
 
     class MutationGuard final {
         Coordinator& owner_;
@@ -400,6 +404,10 @@ class Coordinator final {
     }
 
     void ClearBoundExecutionState() noexcept {
+        staging_.Reset();
+        componentLifecycle_.Reset();
+        activationRestartIssued_ = false;
+        rollbackRestartIssued_ = false;
         verifiedManifestBound_ = false;
         verifiedManifest_ = nullptr;
         targetProfile_ = nullptr;
@@ -457,8 +465,13 @@ class Coordinator final {
         UpdateTransactionId transaction{};
         if (record != nullptr && record->HasActiveTransaction) {
             transaction = record->Active.Transaction;
+            bool executingCandidate = false;
+            if (record->Active.Point >= RecoveryPoint::ActivationSelected &&
+                record->Active.CandidateBootTarget) {
+                executingCandidate = boot_.CurrentBootTarget() == record->Active.CandidateBootTarget;
+            }
             (void)PublishActive(*record, UpdateLifecycle::RecoveryRequired,
-                                record->Active.Point >= RecoveryPoint::TrialBootEntered, true);
+                                executingCandidate, true);
         }
         (void)SetAvailability(CoordinatorAvailability::RecoveryRequired, transaction);
         status_.Availability = CoordinatorAvailability::RecoveryRequired;
@@ -661,6 +674,43 @@ class Coordinator final {
         return {OutcomeClass::Pending, {}};
     }
 
+    Result AdvanceComponentLifecycle(
+        OTAControlRecord<TCapacityProfile>& record,
+        ComponentLifecycleOperation operation) noexcept {
+        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr || boundManifest_ != record.Active.Manifest) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);
+        }
+        if (targetProfile_ == nullptr || !targetProfile_->IsFrozen()) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::TargetProfileRequired);
+        }
+        if (!status_.UpdatePlanReady || !plan_.IsReady()) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::UpdatePlanUnavailable);
+        }
+
+        if ((componentLifecycle_.IsActive() || componentLifecycle_.IsComplete()) &&
+            componentLifecycle_.Operation() != operation) {
+            componentLifecycle_.Reset();
+        }
+        if (!componentLifecycle_.IsActive() && !componentLifecycle_.IsComplete()) {
+            const auto begun = componentLifecycle_.Begin(
+                *verifiedManifest_, plan_, *targetProfile_, record.Active.Transaction,
+                record.Active.CandidateGeneration, operation, true);
+            if (componentLifecycle_.IsComplete()) return Result::Success();
+            if (!componentLifecycle_.IsActive()) return begun;
+            if (begun.Outcome != OutcomeClass::Pending &&
+                begun.Outcome != OutcomeClass::Deferred && !begun) return begun;
+        }
+
+        const auto step = componentLifecycle_.Advance();
+        if (componentLifecycle_.IsComplete()) return Result::Success();
+        if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
+        if (!step) return step;
+        return {OutcomeClass::Pending, {}};
+    }
+
     static std::uint64_t TicksToNanoseconds(Platform::Clock::Tick ticks) noexcept {
         constexpr std::uint64_t frequency = Platform::Clock::FrequencyHz<TClock>;
         constexpr std::uint64_t billion = Platform::Clock::NanosecondsPerSecond;
@@ -692,10 +742,14 @@ class Coordinator final {
     }
 
     Result StartRollback(OTAControlRecord<TCapacityProfile>& record, const Result& cause) noexcept {
+        componentLifecycle_.Reset();
+        rollbackRestartIssued_ = false;
         const auto persisted = control_.PersistRollbackIntent(record.Active.Transaction);
         if (persisted != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(persisted);
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
-        if (!PublishActive(record, UpdateLifecycle::RollbackPending, true)) return ProjectionFailure();
+        const bool executingCandidate =
+            boot_.CurrentBootTarget() == record.Active.CandidateBootTarget;
+        if (!PublishActive(record, UpdateLifecycle::RollbackPending, executingCandidate)) return ProjectionFailure();
         return cause;
     }
 
@@ -780,6 +834,7 @@ public:
           acquisition_(artifactSource, artifactStore, artifactCheckpoints, artifactWorkspace),
           verification_(artifactStore, digestVerifier, artifactWorkspace),
           staging_(artifactStore, stagePolicies_),
+          componentLifecycle_(artifactStore),
           trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
 
@@ -808,32 +863,21 @@ public:
         if (record.Intent == DurableIntent::ActivationArmed) {
             if (current == record.Active.CandidateBootTarget) {
                 if (!trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
-                const auto marked = control_.MarkTrialEntered(record.Active.Transaction);
-                if (marked != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(marked);
-                if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
                 executingCandidate = true;
-                lifecycle = UpdateLifecycle::Trial;
-                trialClockStarted_ = true;
-                trialStartTick_ = clock_.Now();
-                lastHealthEvaluationTick_ = trialStartTick_;
-            } else if (current == record.Active.PreviousCommittedBootTarget) {
-                lifecycle = UpdateLifecycle::AwaitingRestart;
-            } else return RecoveryRequired(&record);
+            } else if (current != record.Active.PreviousCommittedBootTarget) {
+                return RecoveryRequired(&record);
+            }
+            lifecycle = UpdateLifecycle::Activating;
         } else if (record.Intent == DurableIntent::CommitIntent) {
             if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
             executingCandidate = true;
             lifecycle = UpdateLifecycle::Committing;
         } else if (record.Intent == DurableIntent::RollbackIntent) {
-            if (current == record.Active.PreviousCommittedBootTarget) {
-                const auto transaction = record.Active.Transaction;
-                const auto finalized = control_.FinalizeRollback(transaction);
-                if (finalized != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(finalized);
-                if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
-                return PublishTerminal(record, transaction, TerminalUpdateOutcome::RolledBack,
-                                       UpdateOperation::Rollback, Result::Success()) ? Result::Success() : ProjectionFailure();
+            if (current == record.Active.CandidateBootTarget) {
+                executingCandidate = true;
+            } else if (current != record.Active.PreviousCommittedBootTarget) {
+                return RecoveryRequired(&record);
             }
-            if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-            executingCandidate = true;
             lifecycle = UpdateLifecycle::RollingBack;
         } else if (record.Active.Point == RecoveryPoint::TrialBootEntered) {
             if (current != record.Active.CandidateBootTarget || !trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
@@ -856,7 +900,8 @@ public:
         MutationGuard guard{*this};
         if (!guard) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
         if (!initialized_) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::NotInitialized);
-        if (acquisitionStarted_ || acquisition_.IsActive() || verificationStarted_ || verification_.IsActive() || staging_.IsActive()) {
+        if (acquisitionStarted_ || acquisition_.IsActive() || verificationStarted_ || verification_.IsActive() ||
+            staging_.IsActive() || componentLifecycle_.IsActive()) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::Busy);
         }
         if (!targetProfile.IsFrozen()) {
@@ -894,9 +939,12 @@ public:
             }
         }
 
-        const auto preflight = PreflightUpdatePlan(
-            candidatePlan, targetProfile, record.Active.Transaction, record.Active.CandidateGeneration);
-        if (!preflight) return preflight;
+        if (record.Intent == DurableIntent::None &&
+            record.Active.Point < RecoveryPoint::StagingStarted) {
+            const auto preflight = PreflightUpdatePlan(
+                candidatePlan, targetProfile, record.Active.Transaction, record.Active.CandidateGeneration);
+            if (!preflight) return preflight;
+        }
 
         if (record.Active.Point == RecoveryPoint::TransactionCreated) {
             const auto accepted = control_.AdvanceRecoveryPoint(
@@ -921,11 +969,23 @@ public:
         acquisitionStarted_ = false;
         verificationArtifactIndex_ = 0U;
         verificationStarted_ = false;
+        staging_.Reset();
+        componentLifecycle_.Reset();
+        activationRestartIssued_ = false;
+        rollbackRestartIssued_ = false;
         status_.VerifiedManifestBound = true;
         status_.UpdatePlanReady = true;
-        const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
-        if (!PublishActive(record, CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point),
-                           executingCandidate, true)) {
+
+        bool executingCandidate = false;
+        if (record.Active.Point >= RecoveryPoint::ActivationSelected &&
+            record.Active.CandidateBootTarget) {
+            executingCandidate = boot_.CurrentBootTarget() == record.Active.CandidateBootTarget;
+        }
+        auto lifecycle = CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point);
+        if (record.Intent == DurableIntent::ActivationArmed) lifecycle = UpdateLifecycle::Activating;
+        else if (record.Intent == DurableIntent::CommitIntent) lifecycle = UpdateLifecycle::Committing;
+        else if (record.Intent == DurableIntent::RollbackIntent) lifecycle = UpdateLifecycle::RollingBack;
+        if (!PublishActive(record, lifecycle, executingCandidate, true)) {
             return ProjectionFailure();
         }
         status_.VerifiedManifestBound = true;
@@ -984,6 +1044,8 @@ public:
                 verification_.Abort();
                 verificationStarted_ = false;
             }
+            staging_.Reset();
+            componentLifecycle_.Reset();
             const auto abandoned = control_.AbandonTransaction(transaction);
             if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
             if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
@@ -1039,6 +1101,8 @@ public:
         const auto armed = control_.ArmActivation(record.Active.Transaction, request.CandidateBootTarget, previous);
         if (armed != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(armed);
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        componentLifecycle_.Reset();
+        activationRestartIssued_ = false;
         if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();
         return {OutcomeClass::Pending, {}};
     }
@@ -1054,12 +1118,29 @@ public:
         if (!record.HasActiveTransaction) return Result::Success();
 
         if (record.Intent == DurableIntent::ActivationArmed) {
+            const auto componentStep = AdvanceComponentLifecycle(
+                record, ComponentLifecycleOperation::Activate);
+            if (componentStep.Outcome == OutcomeClass::Pending ||
+                componentStep.Outcome == OutcomeClass::Deferred ||
+                componentStep.Outcome == OutcomeClass::Unavailable) return componentStep;
+            if (!componentStep) return StartRollback(record, componentStep);
+
             const auto current = boot_.CurrentBootTarget();
             if (current == record.Active.CandidateBootTarget) {
                 if (!trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
+                if (componentLifecycle_.RestartRequired() && !activationRestartIssued_) {
+                    const auto restart = CoordinatorDetail::PlatformResult(
+                        restart_.Restart(Platform::OTA::RestartReason::ActivateCandidate));
+                    if (restart.Outcome != OutcomeClass::Success && restart.Outcome != OutcomeClass::Pending) return restart;
+                    activationRestartIssued_ = true;
+                    if (!PublishActive(record, UpdateLifecycle::AwaitingRestart, true, true)) return ProjectionFailure();
+                    return CoordinatorDetail::CoreResult(
+                        OutcomeClass::Pending, CoordinatorCoreReason::AwaitingRestart);
+                }
                 const auto marked = control_.MarkTrialEntered(record.Active.Transaction);
                 if (marked != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(marked);
                 if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+                componentLifecycle_.Reset();
                 trialClockStarted_ = true;
                 trialStartTick_ = clock_.Now();
                 lastHealthEvaluationTick_ = trialStartTick_;
@@ -1069,12 +1150,14 @@ public:
             }
             if (current != record.Active.PreviousCommittedBootTarget) return RecoveryRequired(&record);
             if (boot_.NextBootTarget() != record.Active.CandidateBootTarget) {
-                const auto mapped = CoordinatorDetail::PlatformResult(boot_.SelectNextBootTarget(record.Active.CandidateBootTarget));
+                const auto mapped = CoordinatorDetail::PlatformResult(
+                    boot_.SelectNextBootTarget(record.Active.CandidateBootTarget));
                 if (mapped.Outcome != OutcomeClass::Success) return mapped;
                 if (!PublishActive(record, UpdateLifecycle::AwaitingRestart, false, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
             }
-            const auto mapped = CoordinatorDetail::PlatformResult(restart_.Restart(Platform::OTA::RestartReason::ActivateCandidate));
+            const auto mapped = CoordinatorDetail::PlatformResult(
+                restart_.Restart(Platform::OTA::RestartReason::ActivateCandidate));
             if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
             if (!PublishActive(record, UpdateLifecycle::AwaitingRestart, false, true)) return ProjectionFailure();
             return CoordinatorDetail::CoreResult(OutcomeClass::Pending, CoordinatorCoreReason::AwaitingRestart);
@@ -1082,8 +1165,18 @@ public:
 
         if (record.Intent == DurableIntent::CommitIntent) {
             if (boot_.CurrentBootTarget() != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-            const auto platform = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootValid());
-            if (platform.Outcome != OutcomeClass::Success) return platform;
+            if (trial_.IsCurrentBootTrial()) {
+                const auto platform = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootValid());
+                if (platform.Outcome != OutcomeClass::Success) return platform;
+            }
+
+            const auto componentStep = AdvanceComponentLifecycle(
+                record, ComponentLifecycleOperation::Commit);
+            if (componentStep.Outcome == OutcomeClass::Pending ||
+                componentStep.Outcome == OutcomeClass::Deferred ||
+                componentStep.Outcome == OutcomeClass::Unavailable) return componentStep;
+            if (!componentStep || componentLifecycle_.RestartRequired()) return RecoveryRequired(&record);
+
             const auto transaction = record.Active.Transaction;
             const auto finalized = control_.FinalizeCommit(transaction);
             if (finalized != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(finalized);
@@ -1094,8 +1187,24 @@ public:
         }
 
         if (record.Intent == DurableIntent::RollbackIntent) {
+            const auto componentStep = AdvanceComponentLifecycle(
+                record, ComponentLifecycleOperation::Rollback);
+            if (componentStep.Outcome == OutcomeClass::Pending ||
+                componentStep.Outcome == OutcomeClass::Deferred ||
+                componentStep.Outcome == OutcomeClass::Unavailable) return componentStep;
+            if (!componentStep) return RecoveryRequired(&record);
+
             const auto current = boot_.CurrentBootTarget();
             if (current == record.Active.PreviousCommittedBootTarget) {
+                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {
+                    const auto restart = CoordinatorDetail::PlatformResult(
+                        restart_.Restart(Platform::OTA::RestartReason::Rollback));
+                    if (restart.Outcome != OutcomeClass::Success && restart.Outcome != OutcomeClass::Pending) return restart;
+                    rollbackRestartIssued_ = true;
+                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
+                    return CoordinatorDetail::CoreResult(
+                        OutcomeClass::Pending, CoordinatorCoreReason::AwaitingRestart);
+                }
                 const auto transaction = record.Active.Transaction;
                 const auto finalized = control_.FinalizeRollback(transaction);
                 if (finalized != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(finalized);
@@ -1106,7 +1215,8 @@ public:
             }
             if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
             if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-                const auto mapped = CoordinatorDetail::PlatformResult(boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+                const auto mapped = CoordinatorDetail::PlatformResult(
+                    boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
                 if (mapped.Outcome != OutcomeClass::Success) return mapped;
                 if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
@@ -1117,7 +1227,8 @@ public:
                 if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
             }
-            const auto mapped = CoordinatorDetail::PlatformResult(restart_.Restart(Platform::OTA::RestartReason::Rollback));
+            const auto mapped = CoordinatorDetail::PlatformResult(
+                restart_.Restart(Platform::OTA::RestartReason::Rollback));
             if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
             if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
             return CoordinatorDetail::CoreResult(OutcomeClass::Pending, CoordinatorCoreReason::AwaitingRestart);
