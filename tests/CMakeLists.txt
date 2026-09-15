@@ -118,6 +118,11 @@ target_compile_options(espressio_ota_coordinator_cross_version_test PRIVATE ${ES
 target_compile_definitions(espressio_ota_coordinator_cross_version_test PRIVATE ESPRESSIO_OTA_COORDINATOR_SCENARIO=6)
 add_test(NAME espressio_ota_coordinator_cross_version_test COMMAND espressio_ota_coordinator_cross_version_test)
 
+add_executable(espressio_ota_coordinator_platform_recovery_test ota_coordinator_platform_recovery_test.cpp)
+target_link_libraries(espressio_ota_coordinator_platform_recovery_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_coordinator_platform_recovery_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+add_test(NAME espressio_ota_coordinator_platform_recovery_test COMMAND espressio_ota_coordinator_platform_recovery_test)
+
 add_executable(espressio_ota_optional_bridges_test ota_optional_bridges_test.cpp)
 target_link_libraries(espressio_ota_optional_bridges_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_optional_bridges_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
@@ -153,6 +158,7 @@ set(ESPRESSIO_OTA_NATIVE_TEST_TARGETS
     espressio_ota_coordinator_acquisition_test
     espressio_ota_coordinator_staging_recovery_test
     espressio_ota_coordinator_cross_version_test
+    espressio_ota_coordinator_platform_recovery_test
     espressio_ota_optional_bridges_test
     espressio_ota_memory_accounting_test
 )
