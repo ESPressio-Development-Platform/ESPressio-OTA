@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 
+#include "ESPressio_OTAAcquisition.hpp"
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAManifest.hpp"
 #include "ESPressio_OTAUpdatePlan.hpp"
@@ -138,8 +139,12 @@ inline constexpr bool LegalImplementedTransition(UpdateLifecycle from, UpdateLif
             return to == UpdateLifecycle::CandidateSelected || to == UpdateLifecycle::Cancelling ||
                    to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::CandidateSelected:
-        case UpdateLifecycle::Preparing:
+            return to == UpdateLifecycle::Acquiring || to == UpdateLifecycle::Verifying ||
+                   to == UpdateLifecycle::Cancelling || to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::Acquiring:
+            return to == UpdateLifecycle::Verifying || to == UpdateLifecycle::Cancelling ||
+                   to == UpdateLifecycle::RecoveryRequired;
+        case UpdateLifecycle::Preparing:
         case UpdateLifecycle::Verifying:
         case UpdateLifecycle::Staging:
             return to == UpdateLifecycle::Cancelling || to == UpdateLifecycle::RecoveryRequired;
@@ -185,6 +190,15 @@ inline constexpr bool LegalImplementedTransition(UpdateLifecycle from, UpdateLif
     return false;
 }
 
+inline constexpr TerminalUpdateOutcome TerminalOutcomeFor(const Result& result) noexcept {
+    switch (result.Outcome) {
+        case OutcomeClass::Unsupported: return TerminalUpdateOutcome::Unsupported;
+        case OutcomeClass::Rejected: return TerminalUpdateOutcome::Rejected;
+        case OutcomeClass::CapacityUnavailable: return TerminalUpdateOutcome::CapacityUnavailable;
+        default: return TerminalUpdateOutcome::Failed;
+    }
+}
+
 } // namespace CoordinatorDetail
 
 template<typename TCapacityProfile, typename TBootControl, typename TTrialBoot, typename TRestart, typename TClock>
@@ -211,6 +225,7 @@ class Coordinator final {
     ActivatePolicies& activatePolicies_;
     HealthChecks& health_;
     ComponentHandlerDirectory<TCapacityProfile>& handlers_;
+    ArtifactAcquisitionSession<TCapacityProfile> acquisition_;
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -226,6 +241,8 @@ class Coordinator final {
     bool verifiedManifestBound_{false};
     const Manifest<TCapacityProfile>* verifiedManifest_{nullptr};
     UpdatePlan<TCapacityProfile> plan_{};
+    std::size_t acquisitionArtifactIndex_{0U};
+    bool acquisitionStarted_{false};
     bool trialClockStarted_{false};
     Platform::Clock::Tick trialStartTick_{0U};
     Platform::Clock::Tick lastHealthEvaluationTick_{0U};
@@ -396,9 +413,12 @@ class Coordinator final {
         status_.VerifiedManifestBound = false;
         verifiedManifestBound_ = false;
         verifiedManifest_ = nullptr;
+        boundManifest_ = {};
         plan_ = {};
         status_.UpdatePlanReady = false;
         requiredHealthCount_ = 0U;
+        acquisitionArtifactIndex_ = 0U;
+        acquisitionStarted_ = false;
         trialClockStarted_ = false;
         healthEvaluated_ = false;
         return true;
@@ -420,6 +440,67 @@ class Coordinator final {
         (void)SetAvailability(CoordinatorAvailability::RecoveryRequired, transaction);
         status_.Availability = CoordinatorAvailability::RecoveryRequired;
         return CoordinatorDetail::CoreResult(OutcomeClass::Failed, CoordinatorCoreReason::RecoveryRequired);
+    }
+
+    Result FailAcquisition(OTAControlRecord<TCapacityProfile>& record, const Result& failure) noexcept {
+        const auto cleanup = acquisition_.Abort();
+        acquisitionStarted_ = false;
+        if (!cleanup) return RecoveryRequired(&record);
+        const auto transaction = record.Active.Transaction;
+        const auto abandoned = control_.AbandonTransaction(transaction);
+        if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
+        if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        const auto terminal = CoordinatorDetail::TerminalOutcomeFor(failure);
+        return PublishTerminal(record, transaction, terminal, UpdateOperation::Acquire, failure)
+            ? failure : ProjectionFailure();
+    }
+
+    Result AdvanceAcquisition(OTAControlRecord<TCapacityProfile>& record) noexcept {
+        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr || boundManifest_ != record.Active.Manifest) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);
+        }
+        if (!status_.UpdatePlanReady) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::UpdatePlanUnavailable);
+        }
+        if (record.Active.Point != RecoveryPoint::ManifestAccepted) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+
+        const auto artifactCount = verifiedManifest_->Artifacts.size();
+        if (!acquisitionStarted_ && acquisitionArtifactIndex_ >= artifactCount) {
+            const auto acquired = control_.AdvanceRecoveryPoint(
+                record.Active.Transaction, RecoveryPoint::ArtifactsAcquired);
+            if (acquired != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(acquired);
+            if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+            if (!PublishActive(record, UpdateLifecycle::Verifying, false)) return ProjectionFailure();
+            return {OutcomeClass::Pending, {}};
+        }
+
+        if (!acquisitionStarted_) {
+            const auto begun = acquisition_.Begin(
+                record.Active.Transaction, verifiedManifest_->Artifacts[acquisitionArtifactIndex_]);
+            if (begun.Outcome != OutcomeClass::Pending) return FailAcquisition(record, begun);
+            acquisitionStarted_ = true;
+            if (!PublishActive(record, UpdateLifecycle::Acquiring, false)) {
+                (void)acquisition_.Abort();
+                acquisitionStarted_ = false;
+                return ProjectionFailure();
+            }
+            return begun;
+        }
+
+        const auto step = acquisition_.Advance();
+        if (acquisition_.IsComplete()) {
+            acquisitionStarted_ = false;
+            ++acquisitionArtifactIndex_;
+            return {OutcomeClass::Pending, {}};
+        }
+        if (acquisition_.Phase() == ArtifactAcquisitionPhase::Failed) {
+            return FailAcquisition(record, step);
+        }
+        if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
+        if (!step) return FailAcquisition(record, step);
+        return {OutcomeClass::Pending, {}};
     }
 
     static std::uint64_t TicksToNanoseconds(Platform::Clock::Tick ticks) noexcept {
@@ -529,10 +610,16 @@ public:
                 ActivatePolicies& activatePolicies,
                 HealthChecks& health,
                 ComponentHandlerDirectory<TCapacityProfile>& handlers,
+                IArtifactSource& artifactSource,
+                IArtifactStore& artifactStore,
+                ArtifactCheckpointStore<TCapacityProfile>& artifactCheckpoints,
+                ArtifactTransferWorkspace<TCapacityProfile>& artifactWorkspace,
                 std::uint64_t trialTimeoutNanoseconds,
                 std::uint64_t healthReevaluationNanoseconds = 0U) noexcept
         : control_(control), states_(states), boot_(boot), trial_(trial), restart_(restart), clock_(clock),
-          activatePolicies_(activatePolicies), health_(health), handlers_(handlers), trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
+          activatePolicies_(activatePolicies), health_(health), handlers_(handlers),
+          acquisition_(artifactSource, artifactStore, artifactCheckpoints, artifactWorkspace),
+          trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
 
     Result Initialize() noexcept {
@@ -602,6 +689,9 @@ public:
         MutationGuard guard{*this};
         if (!guard) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
         if (!initialized_) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::NotInitialized);
+        if (acquisitionStarted_ || acquisition_.IsActive()) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::Busy);
+        }
         if (ValidateManifest(manifest) != ManifestStatus::Success) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::VerifiedManifestMismatch);
         }
@@ -652,6 +742,8 @@ public:
         verifiedManifest_ = &manifest;
         boundManifest_ = identifier;
         verifiedManifestBound_ = true;
+        acquisitionArtifactIndex_ = 0U;
+        acquisitionStarted_ = false;
         status_.VerifiedManifestBound = true;
         status_.UpdatePlanReady = true;
         const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
@@ -685,9 +777,12 @@ public:
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
         verifiedManifestBound_ = false;
         verifiedManifest_ = nullptr;
+        boundManifest_ = {};
         plan_ = {};
         status_.UpdatePlanReady = false;
         requiredHealthCount_ = 0U;
+        acquisitionArtifactIndex_ = 0U;
+        acquisitionStarted_ = false;
         trialClockStarted_ = false;
         healthEvaluated_ = false;
         hasLifecycle_ = false;
@@ -712,6 +807,11 @@ public:
             return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
         }
         if (record.Active.Point < RecoveryPoint::ActivationSelected) {
+            if (acquisitionStarted_ || acquisition_.IsActive()) {
+                const auto aborted = acquisition_.Abort();
+                if (!aborted) return RecoveryRequired(&record);
+                acquisitionStarted_ = false;
+            }
             const auto abandoned = control_.AbandonTransaction(transaction);
             if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
             if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
@@ -859,6 +959,10 @@ public:
                 lastHealthEvaluationTick_ = trialStartTick_;
             }
             return EvaluateHealth(record);
+        }
+
+        if (record.Active.Point == RecoveryPoint::ManifestAccepted) {
+            return AdvanceAcquisition(record);
         }
 
         if (record.Active.Point < RecoveryPoint::ActivationSelected) {
