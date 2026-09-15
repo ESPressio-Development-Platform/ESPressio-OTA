@@ -3,9 +3,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "ESPressio_OTAComponentHandler.hpp"
 #include "ESPressio_OTADurable.hpp"
+#include "ESPressio_OTAPolicyHealth.hpp"
 #include "ESPressio_OTAUpdatePlan.hpp"
 #include "ESPressio_OTAVerification.hpp"
 
@@ -24,7 +26,8 @@ enum class ComponentExecutionReason : std::uint32_t {
     ArtifactBindingFailed,
     HandlerFailure,
     UnexpectedRestartRequired,
-    RecoveryInconsistent
+    RecoveryInconsistent,
+    StagingByteCountOverflow
 };
 
 namespace ComponentExecutionDetail {
@@ -223,7 +226,8 @@ const ManifestArtifact<TCapacityProfile>* FindManifestArtifact(
 /**
  * Runs the non-mutating handler Preflight surface in deterministic plan order.
  * This is intentionally separate from ComponentStagingSession so the Coordinator
- * can reject/defer before Artifact acquisition begins.
+ * can reject/defer before Artifact acquisition begins and can repeat runtime
+ * preflight at the Stage boundary without beginning mutation.
  */
 template<typename TCapacityProfile>
 Result PreflightUpdatePlan(
@@ -269,6 +273,12 @@ enum class ComponentStagingPhase : std::uint8_t {
  * Cooperative, allocation-free execution of Prepare -> Stage -> FinalizeStage
  * over an immutable UpdatePlan. One handler method is invoked per Advance().
  *
+ * Stage Policy is evaluated exactly when a component is about to cross from an
+ * unmutated Preparing boundary into Prepare. An Allow is latched for that
+ * component so cooperative Pending work is never re-gated after mutation has
+ * begun. Recovery of PartiallyStaged work bypasses ordinary application policy:
+ * reconciliation is safety behavior, not a fresh Stage authorization.
+ *
  * Durable StagingStarted/Staged transitions remain Coordinator-owned. The
  * session therefore requires the caller to persist StagingStarted before Begin
  * and to persist Staged only after IsComplete() becomes true.
@@ -278,7 +288,13 @@ class ComponentStagingSession final {
     static_assert(TCapacityProfile::IsValid,
                   "ComponentStagingSession requires a valid OTA capacity profile");
 
+public:
+    using StagePolicies = PolicyGateSet<StagePolicyDecisionPoint,
+        TCapacityProfile::MaximumPolicyProvidersPerDecisionPoint>;
+
+private:
     IReadableArtifactStore& store_;
+    StagePolicies& stagePolicies_;
     RetainedArtifactReadLease lease_;
     std::array<RetainedVerifiedArtifactReader<TCapacityProfile>,
                TCapacityProfile::MaximumArtifactsPerComponent> readers_{};
@@ -287,12 +303,14 @@ class ComponentStagingSession final {
     const Manifest<TCapacityProfile>* manifest_{nullptr};
     const UpdatePlan<TCapacityProfile>* plan_{nullptr};
     const UpdateTargetProfile<TCapacityProfile>* targetProfile_{nullptr};
+    PolicyCommonContext policyCommon_{};
     UpdateTransactionId transaction_{};
     UpdateGenerationId candidateGeneration_{};
     std::size_t componentIndex_{0U};
     ComponentStagingPhase phase_{ComponentStagingPhase::Idle};
     bool active_{false};
     bool artifactsBound_{false};
+    bool stagePolicyAllowed_{false};
 
     void ReleaseArtifactBindings() noexcept {
         for (auto& reader : readers_) lease_.Close(&reader);
@@ -344,6 +362,45 @@ class ComponentStagingSession final {
         return context;
     }
 
+    Result EvaluateStagePolicy(const UpdatePlanEntry<TCapacityProfile>& entry) noexcept {
+        if (entry.ManifestComponentEntry == nullptr || manifest_ == nullptr) {
+            return ComponentExecutionDetail::Failure(
+                OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration);
+        }
+
+        const auto& component = *entry.ManifestComponentEntry;
+        PolicyContext<StagePolicyDecisionPoint> context;
+        context.Common = policyCommon_;
+        context.Component = ComponentIdentifier{component.Identifier};
+        context.ComponentType = ComponentTypeId{component.TypeId};
+        context.ArtifactCount = component.Artifacts.size();
+
+        std::uint64_t requiredBytes = 0U;
+        for (const auto rawIdentifier : component.Artifacts) {
+            const auto* artifact = FindManifestArtifact(*manifest_, ArtifactIdentifier{rawIdentifier});
+            if (artifact == nullptr) {
+                return ComponentExecutionDetail::Failure(
+                    OutcomeClass::Invalid, ComponentExecutionReason::MissingArtifact);
+            }
+            if (artifact->ExpectedLength > std::numeric_limits<std::uint64_t>::max() - requiredBytes) {
+                return ComponentExecutionDetail::Failure(
+                    OutcomeClass::Invalid, ComponentExecutionReason::StagingByteCountOverflow);
+            }
+            requiredBytes += artifact->ExpectedLength;
+        }
+        context.RequiredStagingBytes = requiredBytes;
+
+        const auto evaluation = stagePolicies_.Evaluate(context);
+        if (evaluation.Decision.Verdict == PolicyVerdict::Defer) {
+            return {OutcomeClass::Deferred, evaluation.Decision.Detail};
+        }
+        if (evaluation.Decision.Verdict == PolicyVerdict::Reject) {
+            return {OutcomeClass::Rejected, evaluation.Decision.Detail};
+        }
+        stagePolicyAllowed_ = true;
+        return Result::Success();
+    }
+
     Result ObserveAction(
         const ComponentActionResult& action,
         ComponentStagingPhase next) noexcept {
@@ -370,8 +427,8 @@ class ComponentStagingSession final {
     }
 
 public:
-    explicit ComponentStagingSession(IReadableArtifactStore& store) noexcept
-        : store_(store), lease_(store_) {}
+    ComponentStagingSession(IReadableArtifactStore& store, StagePolicies& stagePolicies) noexcept
+        : store_(store), stagePolicies_(stagePolicies), lease_(store_) {}
 
     ComponentStagingPhase Phase() const noexcept { return phase_; }
     bool IsActive() const noexcept { return active_; }
@@ -384,8 +441,10 @@ public:
         const UpdateTargetProfile<TCapacityProfile>& targetProfile,
         UpdateTransactionId transaction,
         UpdateGenerationId candidateGeneration,
+        UpdateGenerationId committedGeneration,
         bool recover = false) noexcept {
-        if (active_ || !plan.IsReady() || !targetProfile.IsFrozen() || !transaction || !candidateGeneration) {
+        if (active_ || !plan.IsReady() || !targetProfile.IsFrozen() || !transaction ||
+            !candidateGeneration || !committedGeneration) {
             return ComponentExecutionDetail::Failure(
                 OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration);
         }
@@ -398,6 +457,19 @@ public:
         componentIndex_ = 0U;
         phase_ = ComponentStagingPhase::Preparing;
         active_ = true;
+        stagePolicyAllowed_ = false;
+
+        policyCommon_ = {};
+        policyCommon_.Transaction = transaction;
+        policyCommon_.Release = ReleaseIdentifier{manifest.Release};
+        policyCommon_.Manifest = ManifestIdentifier{manifest.Identifier};
+        policyCommon_.CandidateGeneration = candidateGeneration;
+        policyCommon_.CandidateSecurityGeneration = SecurityGeneration{manifest.SecurityGeneration};
+        policyCommon_.CommittedGeneration = committedGeneration;
+        if (!policyCommon_.IsCanonical()) {
+            return Fail(ComponentExecutionDetail::Failure(
+                OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration));
+        }
 
         if (!recover) {
             if (plan.Size() == 0U) {
@@ -426,12 +498,14 @@ public:
             if (!foundIncomplete && inspection.State == ComponentRecoveryState::NotPrepared) {
                 componentIndex_ = index;
                 phase_ = ComponentStagingPhase::Preparing;
+                stagePolicyAllowed_ = false;
                 foundIncomplete = true;
                 continue;
             }
             if (!foundIncomplete && inspection.State == ComponentRecoveryState::PartiallyStaged) {
                 componentIndex_ = index;
                 phase_ = ComponentStagingPhase::Staging;
+                stagePolicyAllowed_ = true;
                 foundIncomplete = true;
                 continue;
             }
@@ -468,6 +542,12 @@ public:
         }
 
         if (phase_ == ComponentStagingPhase::Preparing) {
+            if (!stagePolicyAllowed_) {
+                const auto policy = EvaluateStagePolicy(*entry);
+                if (policy.Outcome == OutcomeClass::Deferred) return policy;
+                if (policy.Outcome == OutcomeClass::Rejected) return Fail(policy);
+                if (!policy) return Fail(policy);
+            }
             const auto action = entry->Handler->Prepare(preflight);
             return ObserveAction(action, ComponentStagingPhase::Staging);
         }
@@ -492,6 +572,7 @@ public:
             if (action.Status == ComponentActionStatus::Complete && action.Detail) {
                 ReleaseArtifactBindings();
                 ++componentIndex_;
+                stagePolicyAllowed_ = false;
                 if (componentIndex_ == plan_->Size()) {
                     active_ = false;
                     phase_ = ComponentStagingPhase::Complete;
