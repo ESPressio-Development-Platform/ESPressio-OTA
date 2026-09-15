@@ -1,74 +1,92 @@
-name: OTA rollback ordering patch carrier
+name: OTA Demo Builds
 
 on:
   push:
     branches:
       - ota_v1
-
-permissions:
-  contents: write
+  pull_request:
 
 jobs:
-  patch:
+  demos:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ota_v1
-          fetch-depth: 0
 
-      - name: Apply rollback ordering fix
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # PlatformIO Core 6.2.0 currently conflicts with PIOArduino's ESP-IDF
+      # tool-scons package declaration and may delete/reinstall SCons mid-build,
+      # producing SCons.Tool.FortranCommon import failures unrelated to OTA.
+      - name: Install PlatformIO
+        run: python -m pip install "platformio==6.1.19"
+
+      - name: Build ESP32 Arduino PlatformIO provider-readiness demo
+        run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
+
+      - name: Build ESP-IDF PlatformIO provider-readiness demo
+        run: pio run --project-dir demos/ota_espidf_provider_readiness/platformio
+
+      - name: Build exact ESP32 Arduino IDE provider-readiness sketch source
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          from textwrap import indent
+          project="${RUNNER_TEMP}/ota-esp32-arduino-ide"
+          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_provider_readiness/arduino_ide/ota_esp32_provider_readiness/ota_esp32_provider_readiness.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
 
-          path = Path('src/ESPressio_OTACoordinator.hpp')
-          text = path.read_text()
+      - name: Build exact ESP-IDF-provider Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-espidf-arduino-ide"
+          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_espidf_provider_readiness/arduino_ide/ota_espidf_provider_readiness/ota_espidf_provider_readiness.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
 
-          old = indent('''if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-          if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-              const auto mapped = CoordinatorDetail::PlatformResult(
-                  boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-              if (mapped.Outcome != OutcomeClass::Success) return mapped;
-              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-              return {OutcomeClass::Pending, {}};
-          }
-          if (trial_.IsCurrentBootTrial()) {
-              const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
-              if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
-              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-              return {OutcomeClass::Pending, {}};
-          }
-          ''', '            ')
+      - name: Build ESP32 physical-validation PlatformIO harness
+        run: pio run --project-dir demos/ota_esp32_physical_validation/platformio
 
-          new = indent('''if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-          if (trial_.IsCurrentBootTrial()) {
-              const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
-              if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
-              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-              return {OutcomeClass::Pending, {}};
-          }
-          if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-              const auto mapped = CoordinatorDetail::PlatformResult(
-                  boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-              if (mapped.Outcome != OutcomeClass::Success) return mapped;
-              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-              return {OutcomeClass::Pending, {}};
-          }
-          ''', '            ')
+      - name: Build exact ESP32 physical-validation Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-esp32-physical-arduino-ide"
+          cp -R demos/ota_esp32_physical_validation/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_physical_validation/arduino_ide/ota_esp32_physical_validation/ota_esp32_physical_validation.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
 
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f'expected exactly one rollback block, found {count}')
-          path.write_text(text.replace(old, new))
-          PY
+      - name: Build ESP32 Coordinator-recovery PlatformIO harness
+        run: pio run -e esp32dev --project-dir demos/ota_esp32_coordinator_recovery/platformio
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/ESPressio_OTACoordinator.hpp
-          git diff --cached --check
-          git commit -m "fix: invalidate trial before selecting rollback target"
-          git push origin HEAD:ota_v1
+      - name: Build exact ESP32 Coordinator-recovery Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-esp32-coordinator-recovery-arduino-ide"
+          cp -R demos/ota_esp32_coordinator_recovery/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_coordinator_recovery/arduino_ide/ota_esp32_coordinator_recovery/ota_esp32_coordinator_recovery.ino \
+             "${project}/src/main.cpp"
+          pio run -e esp32dev --project-dir "${project}"
+
+      - name: Build and verify ESP32 Coordinator-recovery rollback bootloader harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="demos/ota_esp32_coordinator_recovery/platformio"
+          pio run -e esp32dev-rollback --project-dir "${project}"
+          grep -Fx 'CONFIG_AUTOSTART_ARDUINO=y' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_FREERTOS_HZ=1000' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_COMPILER_CXX_EXCEPTIONS=y' "${project}/sdkconfig.esp32dev-rollback"
+          test -s "${project}/.pio/build/esp32dev-rollback/bootloader.bin"
