@@ -66,7 +66,7 @@ class OTAProviderReadinessDemo final {
         const auto preflight = staging_.PreflightApplicationImage(illustrativeImageBytes);
         Serial.printf("256 KiB stage preflight: %s, maximum=%llu bytes\n",
                       StatusName(preflight.Code),
-                      static_cast<unsigned long long>(preflight.AvailableBytes));
+                      static_cast<unsigned long long>(preflight.MaximumBytes));
     }
 
     void DemonstrateSecurityProvider() {
