@@ -127,7 +127,9 @@ struct PolicyContext<StagePolicyDecisionPoint> final {
     std::uint64_t RequiredStagingBytes{0U};
 
     constexpr bool IsCanonical() const noexcept {
-        return Common.IsCanonical() && bool(Component) && bool(ComponentType) && ArtifactCount != 0U;
+        // A valid component may intentionally have no Artifact payload. ArtifactCount and
+        // RequiredStagingBytes describe the component; they are not validity sentinels.
+        return Common.IsCanonical() && bool(Component) && bool(ComponentType);
     }
 };
 
