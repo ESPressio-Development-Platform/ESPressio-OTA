@@ -1,0 +1,203 @@
+name: P7 coordinator plan binding
+
+on:
+  push:
+    branches: [ota_v1]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Apply coordinator verified Manifest plan binding'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ota_v1
+      - name: Bind verified Manifest to deterministic UpdatePlan
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+
+          coord = Path('src/ESPressio_OTACoordinator.hpp')
+          text = coord.read_text()
+
+          def once(old, new):
+              global text
+              if text.count(old) != 1:
+                  raise RuntimeError(f'coordinator replacement count={text.count(old)}: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+
+          once('#include "ESPressio_OTAManifest.hpp"\n', '#include "ESPressio_OTAManifest.hpp"\n#include "ESPressio_OTAUpdatePlan.hpp"\n')
+          once('    VerifiedManifestMismatch,\n    TrialDeadlineExpired,', '    VerifiedManifestMismatch,\n    UpdatePlanUnavailable,\n    RequiredHealthUnavailable,\n    TrialDeadlineExpired,')
+          once('    bool VerifiedManifestBound{false};\n};', '    bool VerifiedManifestBound{false};\n    bool UpdatePlanReady{false};\n};')
+          once('        case UpdateLifecycle::Checking:\n        case UpdateLifecycle::CandidateSelected:', '        case UpdateLifecycle::Checking:\n            return to == UpdateLifecycle::CandidateSelected || to == UpdateLifecycle::Cancelling ||\n                   to == UpdateLifecycle::RecoveryRequired;\n        case UpdateLifecycle::CandidateSelected:')
+          once('    HealthChecks& health_;\n    std::uint64_t trialTimeoutNanoseconds_{0U};', '    HealthChecks& health_;\n    ComponentHandlerDirectory<TCapacityProfile>& handlers_;\n    std::uint64_t trialTimeoutNanoseconds_{0U};')
+          once('    bool verifiedManifestBound_{false};\n    bool trialClockStarted_{false};', '    bool verifiedManifestBound_{false};\n    const Manifest<TCapacityProfile>* verifiedManifest_{nullptr};\n    UpdatePlan<TCapacityProfile> plan_{};\n    bool trialClockStarted_{false};')
+          once('                HealthChecks& health,\n                std::uint64_t trialTimeoutNanoseconds,', '                HealthChecks& health,\n                ComponentHandlerDirectory<TCapacityProfile>& handlers,\n                std::uint64_t trialTimeoutNanoseconds,')
+          once('          activatePolicies_(activatePolicies), health_(health), trialTimeoutNanoseconds_(trialTimeoutNanoseconds),', '          activatePolicies_(activatePolicies), health_(health), handlers_(handlers), trialTimeoutNanoseconds_(trialTimeoutNanoseconds),')
+
+          pattern = r'    Result BindVerifiedManifest\(const Manifest<TCapacityProfile>& manifest\) noexcept \{.*?\n    \}\n\n    Result Start\('
+          replacement = '''    Result BindVerifiedManifest(const Manifest<TCapacityProfile>& manifest) noexcept {
+        MutationGuard guard{*this};
+        if (!guard) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
+        if (!initialized_) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::NotInitialized);
+        if (ValidateManifest(manifest) != ManifestStatus::Success) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::VerifiedManifestMismatch);
+        }
+        OTAControlRecord<TCapacityProfile> record;
+        const auto loaded = control_.Load(record);
+        if (loaded != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(loaded);
+        if (!record.HasActiveTransaction) return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::NoActiveTransaction);
+        const ManifestIdentifier identifier{manifest.Identifier};
+        if (identifier != record.Active.Manifest || manifest.Release != record.Active.Release.Value() ||
+            manifest.SecurityGeneration != record.Active.CandidateSecurity.Value()) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::VerifiedManifestMismatch);
+        }
+
+        UpdatePlan<TCapacityProfile> candidatePlan;
+        const auto planStatus = BuildUpdatePlan(manifest, handlers_, candidatePlan);
+        if (planStatus != UpdatePlanStatus::Success) {
+            OutcomeClass outcome = OutcomeClass::Invalid;
+            if (planStatus == UpdatePlanStatus::HandlerUnavailable) outcome = OutcomeClass::Unsupported;
+            if (planStatus == UpdatePlanStatus::HandlerDirectoryNotFrozen) outcome = OutcomeClass::Unavailable;
+            if (planStatus == UpdatePlanStatus::CapacityUnavailable) outcome = OutcomeClass::CapacityUnavailable;
+            return {outcome, {DiagnosticDomain::Component, static_cast<std::uint32_t>(planStatus), 0, {}, 0U}};
+        }
+
+        for (const auto rawCondition : manifest.RequiredHealthConditions) {
+            if (health_.Find(HealthConditionTypeId{rawCondition}) == nullptr) {
+                return CoordinatorDetail::CoreResult(OutcomeClass::Unsupported, CoordinatorCoreReason::RequiredHealthUnavailable);
+            }
+        }
+
+        if (record.Active.Point == RecoveryPoint::TransactionCreated) {
+            const auto accepted = control_.AdvanceRecoveryPoint(record.Active.Transaction, RecoveryPoint::ManifestAccepted);
+            if (accepted != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(accepted);
+            if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        } else if (record.Active.Point < RecoveryPoint::ManifestAccepted) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+
+        requiredHealthCount_ = manifest.RequiredHealthConditions.size();
+        for (std::size_t i = 0U; i < requiredHealthCount_; ++i) {
+            requiredHealth_[i] = HealthConditionTypeId{manifest.RequiredHealthConditions[i]};
+        }
+        plan_ = candidatePlan;
+        verifiedManifest_ = &manifest;
+        boundManifest_ = identifier;
+        verifiedManifestBound_ = true;
+        status_.VerifiedManifestBound = true;
+        status_.UpdatePlanReady = true;
+        const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
+        if (!PublishActive(record, CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point), executingCandidate)) {
+            return ProjectionFailure();
+        }
+        status_.VerifiedManifestBound = true;
+        status_.UpdatePlanReady = true;
+        return Result::Success();
+    }
+
+    Result Start('''
+          text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise RuntimeError(f'BindVerifiedManifest replacement count={count}')
+
+          once('        verifiedManifestBound_ = false;\n        requiredHealthCount_ = 0U;', '        verifiedManifestBound_ = false;\n        verifiedManifest_ = nullptr;\n        plan_ = {};\n        status_.UpdatePlanReady = false;\n        requiredHealthCount_ = 0U;')
+          # Terminal completion is the other place that clears verified candidate-scoped execution state.
+          terminal_anchor = '        verifiedManifestBound_ = false;\n        requiredHealthCount_ = 0U;\n        trialClockStarted_ = false;'
+          if text.count(terminal_anchor) != 1:
+              raise RuntimeError(f'terminal reset count={text.count(terminal_anchor)}')
+          text = text.replace(terminal_anchor,
+              '        verifiedManifestBound_ = false;\n        verifiedManifest_ = nullptr;\n        plan_ = {};\n        status_.UpdatePlanReady = false;\n        requiredHealthCount_ = 0U;\n        trialClockStarted_ = false;', 1)
+          coord.write_text(text)
+
+          test = Path('tests/ota_coordinator_test.cpp')
+          text = test.read_text()
+
+          marker = 'using namespace ESPressio::OTA;\n\nnamespace {\n'
+          component_decl = '''using namespace ESPressio::OTA;
+
+struct CoordinatorTestComponent {};
+
+namespace ESPressio::OTA {
+template<>
+struct ComponentTypeTraits<::CoordinatorTestComponent> {
+    static constexpr ComponentTypeDescriptor Describe() noexcept {
+        return {ComponentTypeId{0x4553504F54414301ULL}, "ota.test.application", ComponentKind::ApplicationFirmware,
+                ComponentMultiplicity::Single, 1U};
+    }
+};
+}
+
+namespace {
+'''
+          if text.count(marker) != 1:
+              raise RuntimeError('test namespace marker mismatch')
+          text = text.replace(marker, component_decl, 1)
+
+          capacity_anchor = 'using Capacity = ConstrainedV1CapacityProfile;\n\n'
+          handler_decl = '''using Capacity = ConstrainedV1CapacityProfile;
+
+class CoordinatorTestHandler final : public ComponentHandler<CoordinatorTestComponent, Capacity> {
+public:
+    ComponentRecoveryInspection InspectRecoveryState(const ComponentPreflightContext<Capacity>&) noexcept override {
+        return {ComponentRecoveryState::NotPrepared, Result::Success()};
+    }
+};
+
+'''
+          if text.count(capacity_anchor) != 1:
+              raise RuntimeError('capacity anchor mismatch')
+          text = text.replace(capacity_anchor, handler_decl, 1)
+
+          fixture_anchor = '    HealthRegistryType Health{};\n'
+          fixture_add = '    HealthRegistryType Health{};\n    CoordinatorTestHandler ComponentHandler{};\n    ComponentHandlerDirectory<Capacity> Handlers{};\n'
+          if text.count(fixture_anchor) != 1:
+              raise RuntimeError('fixture anchor mismatch')
+          text = text.replace(fixture_anchor, fixture_add, 1)
+
+          init_anchor = '        if (Policies.Add(ActivatePolicy) != PolicyGateRegistrationStatus::Success) return false;\n'
+          init_add = ('        if (Policies.Add(ActivatePolicy) != PolicyGateRegistrationStatus::Success) return false;\n'
+                      '        if (Handlers.Register(ComponentHandler) != ComponentHandlerDirectoryStatus::Success) return false;\n'
+                      '        Handlers.Freeze();\n')
+          if text.count(init_anchor) != 1:
+              raise RuntimeError('fixture init anchor mismatch')
+          text = text.replace(init_anchor, init_add, 1)
+
+          # ManifestAccepted is now Coordinator-owned during BindVerifiedManifest.
+          old_helper = ('    return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ManifestAccepted) == OTADurableStatus::Success &&\n'
+                        '           control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&')
+          new_helper = ('    return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&')
+          if text.count(old_helper) != 1:
+              raise RuntimeError('AdvanceToStaged anchor mismatch')
+          text = text.replace(old_helper, new_helper, 1)
+
+          # Add handler directory to all three Coordinator constructor calls.
+          old_ctor = 'fixture.Clock, fixture.Policies, fixture.Health, '
+          if text.count(old_ctor) != 3:
+              raise RuntimeError(f'constructor call count={text.count(old_ctor)}')
+          text = text.replace(old_ctor, 'fixture.Clock, fixture.Policies, fixture.Health, fixture.Handlers, ')
+
+          bind_anchor = '        if (!coordinator.BindVerifiedManifest(manifest)) return 25;\n'
+          bind_replacement = ('        if (!coordinator.BindVerifiedManifest(manifest)) return 25;\n'
+                              '        OTAControlRecord<Capacity> acceptedManifest;\n'
+                              '        if (fixture.Control.Load(acceptedManifest) != OTADurableStatus::Success ||\n'
+                              '            acceptedManifest.Active.Point != RecoveryPoint::ManifestAccepted ||\n'
+                              '            !coordinator.Status().UpdatePlanReady ||\n'
+                              '            coordinator.Status().Lifecycle != UpdateLifecycle::CandidateSelected) return 250;\n')
+          if text.count(bind_anchor) != 1:
+              raise RuntimeError('scenario 2 bind anchor mismatch')
+          text = text.replace(bind_anchor, bind_replacement, 1)
+          test.write_text(text)
+      - name: Remove transient workflow
+        run: rm .github/workflows/p7-plan-binding.yml
+      - name: Commit increment
+        run: |
+          git config user.name "ESPressio Automation"
+          git config user.email "automation@espressio.invalid"
+          git add src/ESPressio_OTACoordinator.hpp tests/ota_coordinator_test.cpp .github/workflows/p7-plan-binding.yml
+          git commit -m "Bind verified OTA Manifest to deterministic UpdatePlan"
+          git push origin HEAD:ota_v1
