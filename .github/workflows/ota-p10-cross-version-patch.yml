@@ -1,0 +1,64 @@
+name: OTA P10 Cross-Version Patch
+
+on:
+  push:
+    branches: [ota_v1]
+    paths: [.github/workflows/ota-p10-cross-version-patch.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ota_v1
+      - name: Apply locked cross-version candidate admission
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"{path}: expected one match, got {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          manifest = 'src/ESPressio_OTAManifest.hpp'
+          replace_once(manifest,
+              '#include "ESPressio_OTATypes.hpp"\n#include "ESPressio_Verification.hpp"',
+              '#include "ESPressio_OTATypes.hpp"\n#include "ESPressio_OTAVersionSupport.hpp"\n#include "ESPressio_Verification.hpp"')
+          replace_once(manifest,
+              '    std::uint16_t RequiredOTAProtocol{OTAProtocolV1.Value()};\n    std::uint64_t RequiredOTAFeatures{0U};\n\n    Serializable::BoundedVector<ManifestTargetClause<TCapacityProfile>, TCapacityProfile::MaximumTargetClauses>',
+              '    std::uint16_t RequiredOTAProtocol{OTAProtocolV1.Value()};\n    std::uint64_t RequiredOTAFeatures{0U};\n\n    // Signed candidate-runtime recovery capabilities. These are release-authoritative\n    // facts used before ActivationArmed; they are not inferred from package versions.\n    OTAVersionSupport CandidateManifestSchemaSupport{OTAV1OnlyVersionSupport};\n    OTAVersionSupport CandidateDurableSchemaSupport{OTAV1OnlyVersionSupport};\n    OTAVersionSupport CandidateOTAProtocolSupport{OTAV1OnlyVersionSupport};\n\n    Serializable::BoundedVector<ManifestTargetClause<TCapacityProfile>, TCapacityProfile::MaximumTargetClauses>')
+          replace_once(manifest,
+              '        ESPRESSIO_PROPERTY_REQUIRED("requiredOTAProtocol", RequiredOTAProtocol),\n        ESPRESSIO_PROPERTY_REQUIRED("requiredOTAFeatures", RequiredOTAFeatures),\n        ESPRESSIO_PROPERTY_REQUIRED("targetClauses", TargetClauses),',
+              '        ESPRESSIO_PROPERTY_REQUIRED("requiredOTAProtocol", RequiredOTAProtocol),\n        ESPRESSIO_PROPERTY_REQUIRED("requiredOTAFeatures", RequiredOTAFeatures),\n        ESPRESSIO_PROPERTY_REQUIRED("candidateManifestSchemaSupport", CandidateManifestSchemaSupport),\n        ESPRESSIO_PROPERTY_REQUIRED("candidateDurableSchemaSupport", CandidateDurableSchemaSupport),\n        ESPRESSIO_PROPERTY_REQUIRED("candidateOTAProtocolSupport", CandidateOTAProtocolSupport),\n        ESPRESSIO_PROPERTY_REQUIRED("targetClauses", TargetClauses),')
+          replace_once(manifest,
+              '    if (manifest.DomainTag != ManifestDomainTag || manifest.SchemaVersion != ManifestSchemaV1.Value() ||\n        !NonZero128(manifest.Identifier) || manifest.Release == 0U || manifest.RequiredOTAProtocol == 0U ||\n        manifest.TargetClauses.empty() || manifest.Components.empty() || manifest.SignatureDescriptors.empty()) {',
+              '    if (manifest.DomainTag != ManifestDomainTag || manifest.SchemaVersion != ManifestSchemaV1.Value() ||\n        !NonZero128(manifest.Identifier) || manifest.Release == 0U || manifest.RequiredOTAProtocol == 0U ||\n        !manifest.CandidateManifestSchemaSupport.IsValid() ||\n        !manifest.CandidateDurableSchemaSupport.IsValid() ||\n        !manifest.CandidateOTAProtocolSupport.IsValid() ||\n        !manifest.CandidateManifestSchemaSupport.CanRead(manifest.SchemaVersion) ||\n        manifest.TargetClauses.empty() || manifest.Components.empty() || manifest.SignatureDescriptors.empty()) {')
+
+          coordinator = 'src/ESPressio_OTACoordinator.hpp'
+          replace_once(coordinator,
+              '    InvalidStartRequest,\n    InvalidActivationRequest,\n    StateProjectionFailed',
+              '    InvalidStartRequest,\n    InvalidActivationRequest,\n    CandidateCannotReadCurrentOTASchema,\n    CandidateManifestSchemaUnsupported,\n    StateProjectionFailed')
+          replace_once(coordinator,
+              '        if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {\n            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);\n        }\n        const auto previous = boot_.CommittedBootTarget();',
+              '        if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {\n            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);\n        }\n        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr ||\n            boundManifest_ != record.Active.Manifest) {\n            return CoordinatorDetail::CoreResult(\n                OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);\n        }\n        if (!verifiedManifest_->CandidateDurableSchemaSupport.CanRead(record.SchemaVersion.Value())) {\n            return CoordinatorDetail::CoreResult(\n                OutcomeClass::Unsupported, CoordinatorCoreReason::CandidateCannotReadCurrentOTASchema);\n        }\n        if (!verifiedManifest_->CandidateManifestSchemaSupport.CanRead(verifiedManifest_->SchemaVersion)) {\n            return CoordinatorDetail::CoreResult(\n                OutcomeClass::Unsupported, CoordinatorCoreReason::CandidateManifestSchemaUnsupported);\n        }\n        const auto previous = boot_.CommittedBootTarget();')
+
+          test = 'tests/ota_manifest_test.cpp'
+          replace_once(test,
+              '    if (restored.SecurityGeneration != 0U || restored.ReleaseChannel != 0U) return 11;\n\n    TestManifest duplicate = first;',
+              '    if (restored.SecurityGeneration != 0U || restored.ReleaseChannel != 0U) return 11;\n    if (!restored.CandidateManifestSchemaSupport.CanRead(ManifestSchemaV1.Value()) ||\n        !restored.CandidateDurableSchemaSupport.CanRead(OTADurableSchemaV1.Value()) ||\n        !restored.CandidateOTAProtocolSupport.CanRead(OTAProtocolV1.Value())) return 110;\n\n    TestManifest invalidRuntimeSupport = first;\n    invalidRuntimeSupport.CandidateManifestSchemaSupport = OTAVersionSupport{2U, 2U, 2U};\n    if (ValidateManifest(invalidRuntimeSupport) != ManifestStatus::Invalid) return 111;\n    invalidRuntimeSupport = first;\n    invalidRuntimeSupport.CandidateDurableSchemaSupport = OTAVersionSupport{2U, 1U, 2U};\n    if (ValidateManifest(invalidRuntimeSupport) != ManifestStatus::Invalid) return 112;\n\n    TestManifest duplicate = first;')
+          PY
+          rm .github/workflows/ota-p10-cross-version-patch.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Enforce candidate OTA recovery schema compatibility'
+          git push origin HEAD:ota_v1
