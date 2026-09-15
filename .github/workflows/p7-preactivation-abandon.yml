@@ -19,156 +19,50 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           durable = Path('src/ESPressio_OTADurable.hpp')
           text = durable.read_text()
-          anchor = '''    OTADurableStatus ArmActivation(
-'''
-          method = '''    OTADurableStatus AbandonTransaction(UpdateTransactionId transaction) noexcept {
-        if (!transaction) return OTADurableStatus::Invalid;
-        const auto ready = MutationReady();
-        if (ready != OTADurableStatus::Success) return ready;
-        OTAControlRecord<TCapacityProfile> record;
-        auto status = ReadCommitted(record);
-        if (status != OTADurableStatus::Success) return status;
-        if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-        if (record.Intent != DurableIntent::None || record.Active.Point >= RecoveryPoint::ActivationSelected) {
-            return OTADurableStatus::InvalidTransition;
-        }
-        ClearActive(record);
-        return Commit(record);
-    }
-
-'''
-          if text.count(anchor) != 1:
-              raise RuntimeError(f'expected one ArmActivation anchor, got {text.count(anchor)}')
-          if 'OTADurableStatus AbandonTransaction(' in text:
-              raise RuntimeError('AbandonTransaction already present')
+          anchor = "    OTADurableStatus ArmActivation(\n"
+          method = ("    OTADurableStatus AbandonTransaction(UpdateTransactionId transaction) noexcept {\n"
+                    "        if (!transaction) return OTADurableStatus::Invalid;\n"
+                    "        const auto ready = MutationReady();\n"
+                    "        if (ready != OTADurableStatus::Success) return ready;\n"
+                    "        OTAControlRecord<TCapacityProfile> record;\n"
+                    "        auto status = ReadCommitted(record);\n"
+                    "        if (status != OTADurableStatus::Success) return status;\n"
+                    "        if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;\n"
+                    "        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;\n"
+                    "        if (record.Intent != DurableIntent::None || record.Active.Point >= RecoveryPoint::ActivationSelected) {\n"
+                    "            return OTADurableStatus::InvalidTransition;\n"
+                    "        }\n"
+                    "        ClearActive(record);\n"
+                    "        return Commit(record);\n"
+                    "    }\n\n")
+          if text.count(anchor) != 1 or 'OTADurableStatus AbandonTransaction(' in text:
+              raise RuntimeError('unexpected durable source state')
           text = text.replace(anchor, method + anchor, 1)
-
-          # Repair the two formatting scars left by the guarded BootTarget patch while touching this file.
-          old_record = '''    constexpr bool IsValid() const noexcept {
-        if (!Transaction || !CandidateGeneration || !PreviousCommittedGeneration ||
-  !Release || !Manifest || Point == RecoveryPoint::None ||
-  Point == RecoveryPoint::Committed || Point == RecoveryPoint::RolledBack) return false;
-        const bool activationArmed = Point >= RecoveryPoint::ActivationSelected;
-        if (activationArmed) {
-  if (!CandidateBootTarget || !PreviousCommittedBootTarget ||
-      CandidateBootTarget == PreviousCommittedBootTarget) return false;
-        } else if (CandidateBootTarget || PreviousCommittedBootTarget) {
-  return false;
-        }
-        return true;
-    }
-
-    constexpr bool IsEmpty() const noexcept {
-        return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
-     CandidateSecurity.Value() == 0U && !CandidateBootTarget && !PreviousCommittedBootTarget &&
-     Point == RecoveryPoint::None;
-    }
-'''
-          new_record = '''    constexpr bool IsValid() const noexcept {
-        if (!Transaction || !CandidateGeneration || !PreviousCommittedGeneration ||
-            !Release || !Manifest || Point == RecoveryPoint::None ||
-            Point == RecoveryPoint::Committed || Point == RecoveryPoint::RolledBack) return false;
-        const bool activationArmed = Point >= RecoveryPoint::ActivationSelected;
-        if (activationArmed) {
-            if (!CandidateBootTarget || !PreviousCommittedBootTarget ||
-                CandidateBootTarget == PreviousCommittedBootTarget) return false;
-        } else if (CandidateBootTarget || PreviousCommittedBootTarget) {
-            return false;
-        }
-        return true;
-    }
-
-    constexpr bool IsEmpty() const noexcept {
-        return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
-               CandidateSecurity.Value() == 0U && !CandidateBootTarget && !PreviousCommittedBootTarget &&
-               Point == RecoveryPoint::None;
-    }
-'''
-          if text.count(old_record) != 1:
-              raise RuntimeError('unexpected ActiveTransactionRecord formatting state')
-          text = text.replace(old_record, new_record, 1)
-
-          old_arm = '''    OTADurableStatus ArmActivation(
-    UpdateTransactionId transaction,
-    Platform::OTA::BootTargetIdentifier candidateBootTarget,
-    Platform::OTA::BootTargetIdentifier previousCommittedBootTarget) noexcept {
-    if (!transaction || !candidateBootTarget || !previousCommittedBootTarget ||
-        candidateBootTarget == previousCommittedBootTarget) return OTADurableStatus::Invalid;
-    const auto ready = MutationReady();
-    if (ready != OTADurableStatus::Success) return ready;
-    OTAControlRecord<TCapacityProfile> record;
-    auto status = ReadCommitted(record);
-    if (status != OTADurableStatus::Success) return status;
-    if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-    if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-    if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
-        return OTADurableStatus::InvalidTransition;
-    }
-    record.Active.CandidateBootTarget = candidateBootTarget;
-    record.Active.PreviousCommittedBootTarget = previousCommittedBootTarget;
-    record.Active.Point = RecoveryPoint::ActivationSelected;
-    record.Intent = DurableIntent::ActivationArmed;
-    return Commit(record);
-}
-'''
-          new_arm = '''    OTADurableStatus ArmActivation(
-        UpdateTransactionId transaction,
-        Platform::OTA::BootTargetIdentifier candidateBootTarget,
-        Platform::OTA::BootTargetIdentifier previousCommittedBootTarget) noexcept {
-        if (!transaction || !candidateBootTarget || !previousCommittedBootTarget ||
-            candidateBootTarget == previousCommittedBootTarget) return OTADurableStatus::Invalid;
-        const auto ready = MutationReady();
-        if (ready != OTADurableStatus::Success) return ready;
-        OTAControlRecord<TCapacityProfile> record;
-        auto status = ReadCommitted(record);
-        if (status != OTADurableStatus::Success) return status;
-        if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-        if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
-            return OTADurableStatus::InvalidTransition;
-        }
-        record.Active.CandidateBootTarget = candidateBootTarget;
-        record.Active.PreviousCommittedBootTarget = previousCommittedBootTarget;
-        record.Active.Point = RecoveryPoint::ActivationSelected;
-        record.Intent = DurableIntent::ActivationArmed;
-        return Commit(record);
-    }
-'''
-          if text.count(old_arm) != 1:
-              raise RuntimeError('unexpected ArmActivation formatting state')
-          text = text.replace(old_arm, new_arm, 1)
           durable.write_text(text)
 
           test = Path('tests/ota_durable_test.cpp')
           text = test.read_text()
-          anchor = '''    FakeAtomicRecordStore store;
-'''
-          block = '''    {
-        FakeAtomicRecordStore cancellationStore;
-        OTAControlStore<Capacity> cancellationControl{cancellationStore};
-        if (cancellationControl.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 100;
-        ActiveTransactionRecord cancelled;
-        if (cancellationControl.BeginTransaction(ReleaseIdentifier{7U}, ManifestIdentifier{Id(7U)}, SecurityGeneration{0U}, cancelled) != OTADurableStatus::Success) return 101;
-        if (cancellationControl.AbandonTransaction(cancelled.Transaction) != OTADurableStatus::Success) return 102;
-        OTAControlRecord<Capacity> cancellationLoaded;
-        if (cancellationControl.Load(cancellationLoaded) != OTADurableStatus::Success || cancellationLoaded.HasActiveTransaction) return 103;
-        ActiveTransactionRecord replacement;
-        if (cancellationControl.BeginTransaction(ReleaseIdentifier{8U}, ManifestIdentifier{Id(8U)}, SecurityGeneration{0U}, replacement) != OTADurableStatus::Success) return 104;
-        if (replacement.Transaction != UpdateTransactionId{2U} || replacement.CandidateGeneration != UpdateGenerationId{3U}) return 105;
-        if (cancellationControl.AdvanceRecoveryPoint(replacement.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 106;
-        if (cancellationControl.ArmActivation(replacement.Transaction,
-                ESPressio::Platform::OTA::BootTargetIdentifier{2U},
-                ESPressio::Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 107;
-        if (cancellationControl.AbandonTransaction(replacement.Transaction) != OTADurableStatus::InvalidTransition) return 108;
-    }
-
-'''
+          anchor = "    FakeAtomicRecordStore store;\n"
+          block = ("    {\n"
+                   "        FakeAtomicRecordStore cancellationStore;\n"
+                   "        OTAControlStore<Capacity> cancellationControl{cancellationStore};\n"
+                   "        if (cancellationControl.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 100;\n"
+                   "        ActiveTransactionRecord cancelled;\n"
+                   "        if (cancellationControl.BeginTransaction(ReleaseIdentifier{7U}, ManifestIdentifier{Id(7U)}, SecurityGeneration{0U}, cancelled) != OTADurableStatus::Success) return 101;\n"
+                   "        if (cancellationControl.AbandonTransaction(cancelled.Transaction) != OTADurableStatus::Success) return 102;\n"
+                   "        OTAControlRecord<Capacity> cancellationLoaded;\n"
+                   "        if (cancellationControl.Load(cancellationLoaded) != OTADurableStatus::Success || cancellationLoaded.HasActiveTransaction) return 103;\n"
+                   "        ActiveTransactionRecord replacement;\n"
+                   "        if (cancellationControl.BeginTransaction(ReleaseIdentifier{8U}, ManifestIdentifier{Id(8U)}, SecurityGeneration{0U}, replacement) != OTADurableStatus::Success) return 104;\n"
+                   "        if (replacement.Transaction != UpdateTransactionId{2U} || replacement.CandidateGeneration != UpdateGenerationId{3U}) return 105;\n"
+                   "        if (cancellationControl.AdvanceRecoveryPoint(replacement.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 106;\n"
+                   "        if (cancellationControl.ArmActivation(replacement.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{2U}, ESPressio::Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 107;\n"
+                   "        if (cancellationControl.AbandonTransaction(replacement.Transaction) != OTADurableStatus::InvalidTransition) return 108;\n"
+                   "    }\n\n")
           if text.count(anchor) != 1:
-              raise RuntimeError(f'expected one test store anchor, got {text.count(anchor)}')
+              raise RuntimeError('unexpected durable test state')
           text = text.replace(anchor, block + anchor, 1)
           test.write_text(text)
       - name: Remove transient workflow
