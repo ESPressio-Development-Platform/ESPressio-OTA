@@ -235,10 +235,6 @@ struct Fixture final {
     PassingApplicationReady ApplicationReady{};
     HealthConditionEvaluator<ApplicationReadyHealthCondition, 1U> ApplicationReadyEvaluator{ApplicationReadyChecks};
 
-    ~Fixture() {
-        (void)StateRuntime.Shutdown();
-    }
-
     bool InitializeState() {
         if (RegisterOTAStateTypes(Directory) != Primitive::TypeDirectoryRegistrationStatus::Success) return false;
         if (Directory.Initialize() != Primitive::TypeDirectoryInitializationStatus::Success) return false;
@@ -262,9 +258,14 @@ bool AdvanceToStaged(OTAControlStore<Capacity>& control, UpdateTransactionId tra
 
 } // namespace
 
+#ifndef ESPRESSIO_OTA_COORDINATOR_SCENARIO
+#define ESPRESSIO_OTA_COORDINATOR_SCENARIO 1
+#endif
+
 int main() {
     if (!InstallIdentity()) return 1;
 
+#if ESPRESSIO_OTA_COORDINATOR_SCENARIO == 1
     {
         Fixture fixture;
         if (!fixture.InitializeState()) return 2;
@@ -297,6 +298,7 @@ int main() {
         if (replacement.Transaction != UpdateTransactionId{2U} || replacement.CandidateGeneration != UpdateGenerationId{3U}) return 11;
     }
 
+#elif ESPRESSIO_OTA_COORDINATOR_SCENARIO == 2
     {
         Fixture fixture;
         if (!fixture.InitializeState()) return 20;
@@ -351,6 +353,7 @@ int main() {
             committedState.Value.Identity.Generation != 2U || committedState.Value.SecurityGeneration != 2U) return 41;
     }
 
+#elif ESPRESSIO_OTA_COORDINATOR_SCENARIO == 3
     {
         Fixture fixture;
         if (!fixture.InitializeState()) return 50;
@@ -384,6 +387,10 @@ int main() {
             rolledBack.Committed.Generation != UpdateGenerationId{1U} ||
             rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 65;
     }
+
+#else
+#error Unsupported ESPRESSIO_OTA_COORDINATOR_SCENARIO
+#endif
 
     return 0;
 }
