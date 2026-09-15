@@ -57,6 +57,11 @@ target_link_libraries(espressio_ota_durable_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_durable_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
 add_test(NAME espressio_ota_durable_test COMMAND espressio_ota_durable_test)
 
+add_executable(espressio_ota_durable_fault_injection_test ota_durable_fault_injection_test.cpp)
+target_link_libraries(espressio_ota_durable_fault_injection_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_durable_fault_injection_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+add_test(NAME espressio_ota_durable_fault_injection_test COMMAND espressio_ota_durable_fault_injection_test)
+
 add_executable(espressio_ota_state_test ota_state_test.cpp)
 target_link_libraries(espressio_ota_state_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_state_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
@@ -137,6 +142,7 @@ set(ESPRESSIO_OTA_NATIVE_TEST_TARGETS
     espressio_ota_component_lifecycle_execution_test
     espressio_ota_update_plan_test
     espressio_ota_durable_test
+    espressio_ota_durable_fault_injection_test
     espressio_ota_state_test
     espressio_ota_policy_health_test
     espressio_ota_acquisition_test
