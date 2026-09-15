@@ -1,0 +1,48 @@
+name: OTA Demo Builds
+
+on:
+  push:
+    branches:
+      - ota_v1
+  pull_request:
+
+jobs:
+  demos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build ESP32 Arduino PlatformIO demo
+        run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
+
+      - name: Build ESP-IDF PlatformIO demo
+        run: pio run --project-dir demos/ota_espidf_provider_readiness/platformio
+
+      - name: Build exact ESP32 Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-esp32-arduino-ide"
+          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_provider_readiness/arduino_ide/ota_esp32_provider_readiness/ota_esp32_provider_readiness.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
+
+      - name: Build exact ESP-IDF-provider Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-espidf-arduino-ide"
+          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_espidf_provider_readiness/arduino_ide/ota_espidf_provider_readiness/ota_espidf_provider_readiness.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
