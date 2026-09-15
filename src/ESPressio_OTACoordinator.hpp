@@ -1348,6 +1348,13 @@ public:
 
             const auto current = boot_.CurrentBootTarget();
             if (current == record.Active.PreviousCommittedBootTarget) {
+                if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
+                    const auto selected = CoordinatorDetail::PlatformResult(
+                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+                    if (selected.Outcome != OutcomeClass::Success) return selected;
+                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
+                    return {OutcomeClass::Pending, {}};
+                }
                 if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {
                     const auto restart = CoordinatorDetail::PlatformResult(
                         restart_.Restart(Platform::OTA::RestartReason::Rollback));
