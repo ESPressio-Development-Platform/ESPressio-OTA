@@ -218,7 +218,7 @@ public:
         UpdateTransactionId transaction,
         const ManifestArtifact<TCapacityProfile>& manifestArtifact) noexcept {
         const ArtifactIdentifier identifier{manifestArtifact.Identifier};
-        if (active_) {
+        if (active_ || checkpointActive_) {
             return ArtifactAcquisitionDetail::Failure(
                 OutcomeClass::Unavailable, DiagnosticDomain::OTA, ArtifactAcquisitionReason::Busy);
         }
@@ -368,7 +368,7 @@ public:
     }
 
     Result Abort() noexcept {
-        if (!active_) return Result::Success();
+        if (!active_ && !checkpointActive_) return Result::Success();
         CloseSource();
         AbortStore();
         const auto checkpoint = RemoveCheckpoint();
