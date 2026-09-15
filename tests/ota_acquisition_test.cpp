@@ -193,10 +193,11 @@ ManifestArtifact<Capacity> Artifact(std::uint8_t id, std::uint64_t length) {
     return artifact;
 }
 
-bool RunUntilTerminal(ArtifactAcquisitionSession<Capacity>& session, Result& result) {
+bool RunUntilBoundary(ArtifactAcquisitionSession<Capacity>& session, Result& result) {
     for (std::size_t i = 0U; i < 128U; ++i) {
         result = session.Advance();
-        if (session.IsComplete() || session.Phase() == ArtifactAcquisitionPhase::Failed) return true;
+        if (session.IsComplete() || session.Phase() == ArtifactAcquisitionPhase::Failed ||
+            session.Phase() == ArtifactAcquisitionPhase::SourceFailed) return true;
         if (result.Outcome != OutcomeClass::Pending && result.Outcome != OutcomeClass::Deferred) return false;
     }
     return false;
@@ -205,6 +206,8 @@ bool RunUntilTerminal(ArtifactAcquisitionSession<Capacity>& session, Result& res
 } // namespace
 
 int main() {
+    // Legacy non-resumable Store/Source safely supersedes a stronger old
+    // checkpoint with a zero-prefix revision before requesting new bytes.
     {
         FakeAtomicRecordStore persistence;
         ArtifactCheckpointStore<Capacity> checkpoints{persistence};
@@ -231,16 +234,16 @@ int main() {
 
         ArtifactAcquisitionSession<Capacity> session{source, store, checkpoints, workspace};
         if (session.Begin(UpdateTransactionId{9U}, Artifact(1U, 8U)).Outcome != OutcomeClass::Pending) return 2;
-        if (session.Advance().Outcome != OutcomeClass::Pending || source.OpenOffset != 0U) return 3;
-        if (session.Advance().Outcome != OutcomeClass::Pending) return 4;
-        if (session.Advance().Outcome != OutcomeClass::Pending) return 5;
+        if (session.Advance().Outcome != OutcomeClass::Pending) return 3;
+        if (source.OpenCalls != 0U) return 4;
 
         ArtifactCheckpoint<Capacity> restarted;
         if (checkpoints.Load(0U, restarted) != OTADurableStatus::Success || restarted.Revision != 8U ||
-            restarted.AcceptedPrefixLength != 0U || restarted.PrefixDigestAlgorithm != 0U || !restarted.PrefixDigest.empty()) return 6;
+            restarted.AcceptedPrefixLength != 0U || restarted.PrefixDigestAlgorithm != 0U || !restarted.PrefixDigest.empty()) return 5;
 
+        if (session.Advance().Outcome != OutcomeClass::Pending || source.OpenOffset != 0U) return 6;
         Result result;
-        if (!RunUntilTerminal(session, result) || !session.IsComplete() || !result) return 7;
+        if (!RunUntilBoundary(session, result) || !session.IsComplete() || !result) return 7;
         if (store.Size != 8U || source.CloseCalls != 1U || store.AbortCalls != 0U) return 8;
         for (std::size_t i = 0U; i < 8U; ++i) if (store.Bytes[i] != source.Data[i]) return 9;
         ArtifactCheckpoint<Capacity> removed;
@@ -248,6 +251,9 @@ int main() {
         if (session.AcceptedSourceBytes() != 8U || session.StoredBytes() != 8U) return 11;
     }
 
+    // A truncated Source ends the current Source attempt rather than silently
+    // abandoning the whole OTA transaction. Coordinator policy decides whether
+    // to retry/fail over or call Abort() as the terminal cleanup path.
     {
         FakeAtomicRecordStore persistence;
         ArtifactCheckpointStore<Capacity> checkpoints{persistence};
@@ -259,9 +265,11 @@ int main() {
         ArtifactAcquisitionSession<Capacity> session{source, store, checkpoints, workspace};
         if (session.Begin(UpdateTransactionId{10U}, Artifact(2U, 4U)).Outcome != OutcomeClass::Pending) return 20;
         Result result;
-        if (!RunUntilTerminal(session, result) || session.Phase() != ArtifactAcquisitionPhase::Failed) return 21;
+        if (!RunUntilBoundary(session, result) || session.Phase() != ArtifactAcquisitionPhase::SourceFailed) return 21;
         if (result.Detail.Domain != DiagnosticDomain::Source ||
-            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::Truncated) || store.AbortCalls != 1U) return 22;
+            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::Truncated) ||
+            store.AbortCalls != 1U || !session.AwaitingSourceRetry()) return 22;
+        if (!session.Abort()) return 23;
     }
 
     {
@@ -275,9 +283,11 @@ int main() {
         ArtifactAcquisitionSession<Capacity> session{source, store, checkpoints, workspace};
         if (session.Begin(UpdateTransactionId{11U}, Artifact(3U, 4U)).Outcome != OutcomeClass::Pending) return 30;
         Result result;
-        if (!RunUntilTerminal(session, result) || session.Phase() != ArtifactAcquisitionPhase::Failed) return 31;
+        if (!RunUntilBoundary(session, result) || session.Phase() != ArtifactAcquisitionPhase::SourceFailed) return 31;
         if (result.Detail.Domain != DiagnosticDomain::Source ||
-            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::Overrun) || store.AbortCalls != 1U) return 32;
+            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::Overrun) ||
+            store.AbortCalls != 1U) return 32;
+        if (!session.Abort()) return 33;
     }
 
     {
@@ -292,9 +302,10 @@ int main() {
         ArtifactAcquisitionSession<Capacity> session{source, store, checkpoints, workspace};
         if (session.Begin(UpdateTransactionId{12U}, Artifact(4U, 4U)).Outcome != OutcomeClass::Pending) return 40;
         Result result;
-        if (!RunUntilTerminal(session, result) || session.Phase() != ArtifactAcquisitionPhase::Failed) return 41;
+        if (!RunUntilBoundary(session, result) || session.Phase() != ArtifactAcquisitionPhase::Failed) return 41;
         if (result.Detail.Domain != DiagnosticDomain::Store ||
-            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::IdentifierCollision) || store.AbortCalls != 1U) return 42;
+            result.Detail.Reason != static_cast<std::uint32_t>(ArtifactAcquisitionReason::IdentifierCollision) ||
+            store.AbortCalls != 1U) return 42;
     }
 
     return 0;
