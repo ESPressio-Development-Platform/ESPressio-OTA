@@ -63,3 +63,17 @@ jobs:
           cp demos/ota_esp32_physical_validation/arduino_ide/ota_esp32_physical_validation/ota_esp32_physical_validation.ino \
              "${project}/src/main.cpp"
           pio run --project-dir "${project}"
+
+      - name: Build ESP32 Coordinator-recovery PlatformIO harness
+        run: pio run --project-dir demos/ota_esp32_coordinator_recovery/platformio
+
+      - name: Build exact ESP32 Coordinator-recovery Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-esp32-coordinator-recovery-arduino-ide"
+          cp -R demos/ota_esp32_coordinator_recovery/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_coordinator_recovery/arduino_ide/ota_esp32_coordinator_recovery/ota_esp32_coordinator_recovery.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
