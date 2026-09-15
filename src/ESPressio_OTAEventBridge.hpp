@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "ESPressio_OTAEvents.hpp"
+#include <ESPressio_EventRuntime.hpp>
 
 namespace ESPressio::OTA::Integration {
 
@@ -26,11 +27,7 @@ class OTAEventBridge final {
 
     template<class TEvent, class... TArgs>
     void Emit(TArgs&&... args) noexcept {
-        try {
-            if (!TEvent::TryDispatch(static_cast<TArgs&&>(args)...)) ++unavailableOccurrences_;
-        } catch (...) {
-            ++unavailableOccurrences_;
-        }
+        if (!TEvent::TryDispatch(static_cast<TArgs&&>(args)...)) ++unavailableOccurrences_;
     }
 
     void CaptureContext(const ActiveUpdateTransactionValue& active) noexcept {
