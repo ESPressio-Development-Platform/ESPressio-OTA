@@ -61,9 +61,11 @@ using ActivatePolicies = PolicyGateSet<
     Capacity::MaximumPolicyProvidersPerDecisionPoint>;
 using HealthRegistryType = HealthRegistry<Capacity::MaximumRequiredHealthConditions>;
 using CoordinatorType = Coordinator<Capacity, BootControl, TrialBoot, Restart, Clock>;
+
+constexpr std::size_t DurableRecordKeyCount = 1U + Capacity::MaximumArtifactCheckpoints;
 using DurableStore = Persistence::NVSAtomicRecordStore<
     Capacity::MaximumOTAControlRecordBytes,
-    1U>;
+    DurableRecordKeyCount>;
 
 constexpr std::size_t CloneChunkBytes = 4096U;
 constexpr char DurableNamespace[] = "ota_coord_lab";
@@ -75,11 +77,26 @@ constexpr std::array<std::uint8_t, 16> Id(std::uint8_t value) noexcept {
     return result;
 }
 
-constexpr std::array<Persistence::AtomicRecordKey, 1U> DurableKeys = [] {
-    std::array<Persistence::AtomicRecordKey, 1U> keys{};
+constexpr std::array<Persistence::AtomicRecordKey, DurableRecordKeyCount> DurableKeys = [] {
+    std::array<Persistence::AtomicRecordKey, DurableRecordKeyCount> keys{};
     keys[0] = OTAControlStore<Capacity>::RecordKey();
+    for (std::size_t slot = 0U; slot < Capacity::MaximumArtifactCheckpoints; ++slot) {
+        (void)ArtifactCheckpointStore<Capacity>::TryRecordKey(slot, keys[slot + 1U]);
+    }
     return keys;
 }();
+
+constexpr bool DurableKeysAreValid = [] {
+    for (std::size_t left = 0U; left < DurableKeys.size(); ++left) {
+        if (!DurableKeys[left]) return false;
+        for (std::size_t right = left + 1U; right < DurableKeys.size(); ++right) {
+            if (DurableKeys[left] == DurableKeys[right]) return false;
+        }
+    }
+    return true;
+}();
+static_assert(DurableKeysAreValid,
+              "Coordinator recovery lab must provision every bounded OTA durable record key exactly once");
 
 Timing::QualifiedTime CapturedTime() {
     return {
@@ -596,7 +613,7 @@ public:
     void PrintHelp() {
         Serial.println();
         Serial.println("ESPressio OTA Coordinator Recovery Lab");
-        Serial.println("Startup is read-only apart from first-time provisioning of the dedicated OTA control record.");
+        Serial.println("Startup is read-only apart from first-time provisioning of the dedicated OTA durable records.");
         Serial.println("Mutating commands require the literal suffix ' NOW'.");
         Serial.println("  status");
         Serial.println("  clone NOW      - cooperatively clone running image into inactive OTA slot");

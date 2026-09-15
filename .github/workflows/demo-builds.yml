@@ -86,6 +86,7 @@ jobs:
           pio run -e esp32dev-rollback --project-dir "${project}"
           grep -Fx 'CONFIG_AUTOSTART_ARDUINO=y' "${project}/sdkconfig.esp32dev-rollback"
           grep -Fx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_FREERTOS_HZ=1000' "${project}/sdkconfig.esp32dev-rollback"
           grep -Fx 'CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y' "${project}/sdkconfig.esp32dev-rollback"
           grep -Fx 'CONFIG_COMPILER_CXX_EXCEPTIONS=y' "${project}/sdkconfig.esp32dev-rollback"
           test -s "${project}/.pio/build/esp32dev-rollback/bootloader.bin"

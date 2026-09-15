@@ -27,12 +27,17 @@ esp32dev           Arduino/Arduino-IDE-equivalent compile path; uses the prebuil
 esp32dev-rollback  Arduino as an ESP-IDF component; rebuilds bootloader from sdkconfig.defaults
 ```
 
-The checked-in `sdkconfig.defaults` contains both:
+The rollback environment owns its exact 4 MiB dual-OTA partition table in `platformio/min_spiffs.csv`; it does not rely on a board-package-relative partition CSV. The checked-in `sdkconfig.defaults` contains the build-critical hybrid settings:
 
 ```text
 CONFIG_AUTOSTART_ARDUINO=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
 ```
+
+`CONFIG_COMPILER_CXX_EXCEPTIONS=y` is required by the hybrid ESP-IDF composition because ESP-IDF otherwise compiles C++ with exceptions disabled while existing ESPressio dependencies such as Threads and Units use C++ exception semantics. This is a toolchain/composition requirement, not an OTA-domain semantic contract.
 
 Build or flash the physical rollback laboratory with:
 
@@ -41,7 +46,7 @@ pio run -e esp32dev-rollback --project-dir demos/ota_esp32_coordinator_recovery/
 pio run -e esp32dev-rollback -t upload --project-dir demos/ota_esp32_coordinator_recovery/platformio
 ```
 
-CI additionally checks the merged environment-specific sdkconfig and requires a non-empty rollback-environment `bootloader.bin`; this protects against accidentally compiling only the application while ignoring the bootloader setting.
+CI additionally checks the merged environment-specific sdkconfig for the hybrid settings above and requires a non-empty rollback-environment `bootloader.bin`; this protects against accidentally compiling only the application while ignoring the bootloader configuration.
 
 CI compilation therefore proves source/toolchain/configuration integration only. It must never be recorded as physical Trial/power-loss evidence.
 
@@ -62,7 +67,7 @@ cancel NOW
 
 `status` and `help` are read-only.
 
-The durable backend is the ESP32 `NVSAtomicRecordStore` bound only to `OTAControlStore::RecordKey()`. This zero-Artifact lab never invokes Artifact checkpoint persistence. A subsequent Artifact-bearing laboratory will register the authoritative checkpoint record keys as well.
+The durable backend is the ESP32 `NVSAtomicRecordStore` provisioned with the complete bounded OTA durable key set for this capacity profile: `OTAControlStore::RecordKey()` plus all `Capacity::MaximumArtifactCheckpoints` authoritative `ArtifactCheckpointStore` record keys. The current zero-Artifact fixture does not write checkpoint records, but its durable backend is already composition-complete for an Artifact-bearing transaction and does not need to be rewired to make those keys legal.
 
 ## Normal commit path
 
