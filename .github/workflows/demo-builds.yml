@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ github.event.head_commit.message == 'chore: retry OTA rollback ordering patch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,41 +23,42 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          from textwrap import indent
 
           path = Path('src/ESPressio_OTACoordinator.hpp')
           text = path.read_text()
 
-          old = '''            if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-            if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-                const auto mapped = CoordinatorDetail::PlatformResult(
-                    boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-                if (mapped.Outcome != OutcomeClass::Success) return mapped;
-                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-                return {OutcomeClass::Pending, {}};
-            }
-            if (trial_.IsCurrentBootTrial()) {
-                const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
-                if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
-                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-                return {OutcomeClass::Pending, {}};
-            }
-          '''
+          old = indent('''if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
+          if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
+              const auto mapped = CoordinatorDetail::PlatformResult(
+                  boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+              if (mapped.Outcome != OutcomeClass::Success) return mapped;
+              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
+              return {OutcomeClass::Pending, {}};
+          }
+          if (trial_.IsCurrentBootTrial()) {
+              const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
+              if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
+              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
+              return {OutcomeClass::Pending, {}};
+          }
+          ''', '            ')
 
-          new = '''            if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
-            if (trial_.IsCurrentBootTrial()) {
-                const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
-                if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
-                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-                return {OutcomeClass::Pending, {}};
-            }
-            if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-                const auto mapped = CoordinatorDetail::PlatformResult(
-                    boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-                if (mapped.Outcome != OutcomeClass::Success) return mapped;
-                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-                return {OutcomeClass::Pending, {}};
-            }
-          '''
+          new = indent('''if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
+          if (trial_.IsCurrentBootTrial()) {
+              const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
+              if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
+              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
+              return {OutcomeClass::Pending, {}};
+          }
+          if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
+              const auto mapped = CoordinatorDetail::PlatformResult(
+                  boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+              if (mapped.Outcome != OutcomeClass::Success) return mapped;
+              if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
+              return {OutcomeClass::Pending, {}};
+          }
+          ''', '            ')
 
           count = text.count(old)
           if count != 1:
