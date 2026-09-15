@@ -89,5 +89,7 @@ jobs:
         run: ./build/tests/espressio_ota_offer_test
       - name: OTA retained-memory accounting report
         run: ./build/tests/espressio_ota_memory_accounting_test
+      - name: Temporary platform recovery diagnostic
+        run: ./build/tests/espressio_ota_coordinator_platform_recovery_diagnostic
       - name: Test
         run: ctest --test-dir build --output-on-failure
