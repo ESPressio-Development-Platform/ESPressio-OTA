@@ -71,6 +71,16 @@ jobs:
           repository: ESPressio-Development-Platform/ESPressio-State
           ref: primitives_redesign
           path: deps/ESPressio-State
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Event
+          ref: primitives_redesign
+          path: deps/ESPressio-Event
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Command
+          ref: primitives_redesign
+          path: deps/ESPressio-Command
       - name: Configure
         run: cmake -S . -B build
       - name: Build
