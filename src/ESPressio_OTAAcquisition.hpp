@@ -421,6 +421,7 @@ public:
         switch (phase_) {
             case ArtifactAcquisitionPhase::PreparingCheckpoint: {
                 const auto prepared = PrepareCheckpoint();
+                if (ArtifactAcquisitionDetail::Transient(prepared)) return prepared;
                 if (!prepared) return Fail(prepared);
                 return prepared;
             }
