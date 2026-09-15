@@ -200,12 +200,28 @@ class FaultTrialBoot final : public Platform::ProviderDeclaration<
     TrialBackend, Platform::CapabilitySet<Platform::Capability::TrialBoot>> {
 public:
     bool Trial{false};
+    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};
+    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};
+    mutable std::size_t InspectCalls{0U};
     Platform::OTA::Status MarkValidStatus{Platform::OTA::Status::Success};
     Platform::OTA::Status MarkInvalidStatus{Platform::OTA::Status::Success};
     std::size_t MarkValidCalls{0U};
     std::size_t MarkInvalidCalls{0U};
 
     bool IsCurrentBootTrial() const noexcept { return Trial; }
+    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
+        Platform::OTA::BootTargetIdentifier target) const noexcept {
+        ++InspectCalls;
+        if (!target) {
+            return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
+        }
+        return {
+            InspectStatus,
+            InspectStatus == Platform::OTA::Status::Success
+                ? CandidateState
+                : Platform::OTA::TrialBootState::Unknown,
+            InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
+    }
     Platform::OTA::Result MarkCurrentBootValid() noexcept {
         ++MarkValidCalls;
         if (MarkValidStatus == Platform::OTA::Status::Success) Trial = false;
@@ -430,6 +446,54 @@ int main() {
         }
         if (!LoadActive(fixture, record) || record.Active.Point != RecoveryPoint::TrialBootEntered ||
             record.Intent != DurableIntent::None) return 18;
+    }
+
+    // A candidate that had entered Trial and was rejected by the bootloader
+    // must never be blindly re-armed from recovered ActivationArmed state.
+    {
+        Fixture fixture;
+        if (!fixture.InitializeRuntime()) return 51;
+        ActiveTransactionRecord active;
+        if (!fixture.CreateStaged(11U, active)) return 52;
+        const auto manifest = CandidateManifest(11U);
+        if (fixture.Control.ArmActivation(
+                active.Transaction,
+                Platform::OTA::BootTargetIdentifier{2U},
+                Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 53;
+        fixture.Handler.Recovery = ComponentRecoveryState::Activated;
+        fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
+        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
+        fixture.Trial.CandidateState = Platform::OTA::TrialBootState::Rejected;
+
+        auto coordinator = fixture.MakeCoordinator();
+        if (!coordinator.Initialize() ||
+            !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 54;
+        const auto rejected = coordinator.Advance();
+        if (rejected.Outcome != OutcomeClass::Failed ||
+            rejected.Detail.Reason != static_cast<std::uint32_t>(CoordinatorCoreReason::CandidateTrialRejected) ||
+            fixture.Boot.SelectCalls != 0U ||
+            fixture.Trial.InspectCalls != 1U) return 55;
+
+        OTAControlRecord<Capacity> record;
+        if (!LoadActive(fixture, record) ||
+            record.Intent != DurableIntent::RollbackIntent ||
+            record.Committed.Generation != UpdateGenerationId{1U}) return 56;
+
+        // Even if next-boot somehow still names the rejected candidate,
+        // rollback must normalize it to the previous committed target
+        // before durable rollback state can be finalized.
+        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{2U};
+        const auto normalize = coordinator.Advance();
+        if (normalize.Outcome != OutcomeClass::Pending ||
+            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
+            fixture.Boot.SelectCalls != 1U) return 57;
+        if (!LoadActive(fixture, record) ||
+            record.Intent != DurableIntent::RollbackIntent) return 58;
+
+        if (!coordinator.Advance()) return 59;
+        if (fixture.Control.Load(record) != OTADurableStatus::Success ||
+            record.HasActiveTransaction ||
+            record.Committed.Generation != UpdateGenerationId{1U}) return 60;
     }
 #elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2
     // Commit: power loss/failure after durable CommitIntent cannot promote the
