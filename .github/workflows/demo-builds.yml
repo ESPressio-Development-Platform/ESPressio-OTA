@@ -22,13 +22,13 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install "platformio==6.1.19"
 
-      - name: Build ESP32 Arduino PlatformIO demo
+      - name: Build ESP32 Arduino PlatformIO provider-readiness demo
         run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
 
-      - name: Build ESP-IDF PlatformIO demo
+      - name: Build ESP-IDF PlatformIO provider-readiness demo
         run: pio run --project-dir demos/ota_espidf_provider_readiness/platformio
 
-      - name: Build exact ESP32 Arduino IDE sketch source
+      - name: Build exact ESP32 Arduino IDE provider-readiness sketch source
         shell: bash
         run: |
           set -euo pipefail
@@ -47,5 +47,19 @@ jobs:
           cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
           rm "${project}/src/main.cpp"
           cp demos/ota_espidf_provider_readiness/arduino_ide/ota_espidf_provider_readiness/ota_espidf_provider_readiness.ino \
+             "${project}/src/main.cpp"
+          pio run --project-dir "${project}"
+
+      - name: Build ESP32 physical-validation PlatformIO harness
+        run: pio run --project-dir demos/ota_esp32_physical_validation/platformio
+
+      - name: Build exact ESP32 physical-validation Arduino IDE sketch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/ota-esp32-physical-arduino-ide"
+          cp -R demos/ota_esp32_physical_validation/platformio "${project}"
+          rm "${project}/src/main.cpp"
+          cp demos/ota_esp32_physical_validation/arduino_ide/ota_esp32_physical_validation/ota_esp32_physical_validation.ino \
              "${project}/src/main.cpp"
           pio run --project-dir "${project}"
