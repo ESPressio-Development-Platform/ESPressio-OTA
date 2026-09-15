@@ -50,10 +50,14 @@ constexpr bool ArtifactCheckpointValid(const ArtifactCheckpoint<TCapacityProfile
     for (const auto byte : checkpoint.Artifact) if (byte != 0U) { artifactNonZero = true; break; }
     if (!artifactNonZero) return false;
 
-    if (checkpoint.AcceptedPrefixLength == 0U) {
-        return checkpoint.PrefixDigestAlgorithm == 0U && checkpoint.PrefixDigest.empty();
-    }
-    return checkpoint.PrefixDigestAlgorithm != 0U && !checkpoint.PrefixDigest.empty();
+    // V1 correctness never depends on persisted opaque verifier state. A prefix
+    // digest is optional explicit evidence only: when absent, safe resume
+    // requires private prefix replay and the normal full-Artifact verification
+    // pass before ArtifactsVerified. If one member of the digest pair is present,
+    // both must be present.
+    const bool hasAlgorithm = checkpoint.PrefixDigestAlgorithm != 0U;
+    const bool hasDigest = !checkpoint.PrefixDigest.empty();
+    return hasAlgorithm == hasDigest;
 }
 
 namespace CheckpointDetail {
