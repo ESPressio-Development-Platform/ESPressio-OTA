@@ -6,6 +6,7 @@
 #include <limits>
 
 #include "ESPressio_OTAAcquisition.hpp"
+#include "ESPressio_OTAVerification.hpp"
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAManifest.hpp"
 #include "ESPressio_OTAUpdatePlan.hpp"
@@ -144,8 +145,10 @@ inline constexpr bool LegalImplementedTransition(UpdateLifecycle from, UpdateLif
         case UpdateLifecycle::Acquiring:
             return to == UpdateLifecycle::Verifying || to == UpdateLifecycle::Cancelling ||
                    to == UpdateLifecycle::RecoveryRequired;
-        case UpdateLifecycle::Preparing:
         case UpdateLifecycle::Verifying:
+            return to == UpdateLifecycle::Preparing || to == UpdateLifecycle::Cancelling ||
+                   to == UpdateLifecycle::RecoveryRequired;
+        case UpdateLifecycle::Preparing:
         case UpdateLifecycle::Staging:
             return to == UpdateLifecycle::Cancelling || to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::Staged:
@@ -226,6 +229,7 @@ class Coordinator final {
     HealthChecks& health_;
     ComponentHandlerDirectory<TCapacityProfile>& handlers_;
     ArtifactAcquisitionSession<TCapacityProfile> acquisition_;
+    ArtifactVerificationSession<TCapacityProfile> verification_;
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -243,6 +247,8 @@ class Coordinator final {
     UpdatePlan<TCapacityProfile> plan_{};
     std::size_t acquisitionArtifactIndex_{0U};
     bool acquisitionStarted_{false};
+    std::size_t verificationArtifactIndex_{0U};
+    bool verificationStarted_{false};
     bool trialClockStarted_{false};
     Platform::Clock::Tick trialStartTick_{0U};
     Platform::Clock::Tick lastHealthEvaluationTick_{0U};
@@ -419,6 +425,8 @@ class Coordinator final {
         requiredHealthCount_ = 0U;
         acquisitionArtifactIndex_ = 0U;
         acquisitionStarted_ = false;
+        verificationArtifactIndex_ = 0U;
+        verificationStarted_ = false;
         trialClockStarted_ = false;
         healthEvaluated_ = false;
         return true;
@@ -500,6 +508,65 @@ class Coordinator final {
         }
         if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
         if (!step) return FailAcquisition(record, step);
+        return {OutcomeClass::Pending, {}};
+    }
+
+    Result FailVerification(OTAControlRecord<TCapacityProfile>& record, const Result& failure) noexcept {
+        verification_.Abort();
+        verificationStarted_ = false;
+        const auto transaction = record.Active.Transaction;
+        const auto abandoned = control_.AbandonTransaction(transaction);
+        if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
+        if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        const auto terminal = CoordinatorDetail::TerminalOutcomeFor(failure);
+        return PublishTerminal(record, transaction, terminal, UpdateOperation::Verify, failure)
+            ? failure : ProjectionFailure();
+    }
+
+    Result AdvanceVerification(OTAControlRecord<TCapacityProfile>& record) noexcept {
+        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr || boundManifest_ != record.Active.Manifest) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);
+        }
+        if (!status_.UpdatePlanReady) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::UpdatePlanUnavailable);
+        }
+        if (record.Active.Point != RecoveryPoint::ArtifactsAcquired) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+
+        const auto artifactCount = verifiedManifest_->Artifacts.size();
+        if (!verificationStarted_ && verificationArtifactIndex_ >= artifactCount) {
+            const auto verified = control_.AdvanceRecoveryPoint(
+                record.Active.Transaction, RecoveryPoint::ArtifactsVerified);
+            if (verified != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(verified);
+            if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+            if (!PublishActive(record, UpdateLifecycle::Preparing, false)) return ProjectionFailure();
+            return {OutcomeClass::Pending, {}};
+        }
+
+        if (!verificationStarted_) {
+            const auto begun = verification_.Begin(verifiedManifest_->Artifacts[verificationArtifactIndex_]);
+            if (begun.Outcome != OutcomeClass::Pending) return FailVerification(record, begun);
+            verificationStarted_ = true;
+            if (!PublishActive(record, UpdateLifecycle::Verifying, false)) {
+                verification_.Abort();
+                verificationStarted_ = false;
+                return ProjectionFailure();
+            }
+            return begun;
+        }
+
+        const auto step = verification_.Advance();
+        if (verification_.IsComplete()) {
+            verificationStarted_ = false;
+            ++verificationArtifactIndex_;
+            return {OutcomeClass::Pending, {}};
+        }
+        if (verification_.Phase() == ArtifactVerificationPhase::Failed) {
+            return FailVerification(record, step);
+        }
+        if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
+        if (!step) return FailVerification(record, step);
         return {OutcomeClass::Pending, {}};
     }
 
@@ -611,14 +678,16 @@ public:
                 HealthChecks& health,
                 ComponentHandlerDirectory<TCapacityProfile>& handlers,
                 IArtifactSource& artifactSource,
-                IArtifactStore& artifactStore,
+                IReadableArtifactStore& artifactStore,
                 ArtifactCheckpointStore<TCapacityProfile>& artifactCheckpoints,
                 ArtifactTransferWorkspace<TCapacityProfile>& artifactWorkspace,
+                Security::IStreamingDigestVerifier& digestVerifier,
                 std::uint64_t trialTimeoutNanoseconds,
                 std::uint64_t healthReevaluationNanoseconds = 0U) noexcept
         : control_(control), states_(states), boot_(boot), trial_(trial), restart_(restart), clock_(clock),
           activatePolicies_(activatePolicies), health_(health), handlers_(handlers),
           acquisition_(artifactSource, artifactStore, artifactCheckpoints, artifactWorkspace),
+          verification_(artifactStore, digestVerifier, artifactWorkspace),
           trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
 
@@ -689,7 +758,7 @@ public:
         MutationGuard guard{*this};
         if (!guard) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
         if (!initialized_) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::NotInitialized);
-        if (acquisitionStarted_ || acquisition_.IsActive()) {
+        if (acquisitionStarted_ || acquisition_.IsActive() || verificationStarted_ || verification_.IsActive()) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::Busy);
         }
         if (ValidateManifest(manifest) != ManifestStatus::Success) {
@@ -744,6 +813,8 @@ public:
         verifiedManifestBound_ = true;
         acquisitionArtifactIndex_ = 0U;
         acquisitionStarted_ = false;
+        verificationArtifactIndex_ = 0U;
+        verificationStarted_ = false;
         status_.VerifiedManifestBound = true;
         status_.UpdatePlanReady = true;
         const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
@@ -783,6 +854,8 @@ public:
         requiredHealthCount_ = 0U;
         acquisitionArtifactIndex_ = 0U;
         acquisitionStarted_ = false;
+        verificationArtifactIndex_ = 0U;
+        verificationStarted_ = false;
         trialClockStarted_ = false;
         healthEvaluated_ = false;
         hasLifecycle_ = false;
@@ -811,6 +884,10 @@ public:
                 const auto aborted = acquisition_.Abort();
                 if (!aborted) return RecoveryRequired(&record);
                 acquisitionStarted_ = false;
+            }
+            if (verificationStarted_ || verification_.IsActive()) {
+                verification_.Abort();
+                verificationStarted_ = false;
             }
             const auto abandoned = control_.AbandonTransaction(transaction);
             if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
@@ -963,6 +1040,10 @@ public:
 
         if (record.Active.Point == RecoveryPoint::ManifestAccepted) {
             return AdvanceAcquisition(record);
+        }
+
+        if (record.Active.Point == RecoveryPoint::ArtifactsAcquired) {
+            return AdvanceVerification(record);
         }
 
         if (record.Active.Point < RecoveryPoint::ActivationSelected) {
