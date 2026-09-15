@@ -6,6 +6,7 @@
 #include <limits>
 
 #include "ESPressio_OTAAcquisition.hpp"
+#include "ESPressio_OTAArtifactSourceSelection.hpp"
 #include "ESPressio_OTAVerification.hpp"
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAManifest.hpp"
@@ -44,7 +45,9 @@ enum class CoordinatorCoreReason : std::uint32_t {
     InvalidActivationRequest,
     CandidateCannotReadCurrentOTASchema,
     CandidateManifestSchemaUnsupported,
-    StateProjectionFailed
+    StateProjectionFailed,
+    ArtifactSourceSelectionFailed,
+    ArtifactSourceRetryExhausted
 };
 
 struct CoordinatorStartRequest final {
@@ -243,6 +246,9 @@ class Coordinator final {
     ArtifactVerificationSession<TCapacityProfile> verification_;
     ComponentStagingSession<TCapacityProfile> staging_;
     ComponentLifecycleExecutionSession<TCapacityProfile> componentLifecycle_;
+    IArtifactSourceSelector* artifactSourceSelector_{nullptr};
+    std::size_t maximumArtifactSourceAttempts_{1U};
+    std::size_t acquisitionSourceAttempt_{0U};
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -419,6 +425,7 @@ class Coordinator final {
         requiredHealthCount_ = 0U;
         acquisitionArtifactIndex_ = 0U;
         acquisitionStarted_ = false;
+        acquisitionSourceAttempt_ = 0U;
         verificationArtifactIndex_ = 0U;
         verificationStarted_ = false;
         trialClockStarted_ = false;
@@ -483,6 +490,7 @@ class Coordinator final {
     Result FailAcquisition(OTAControlRecord<TCapacityProfile>& record, const Result& failure) noexcept {
         const auto cleanup = acquisition_.Abort();
         acquisitionStarted_ = false;
+        acquisitionSourceAttempt_ = 0U;
         if (!cleanup) return RecoveryRequired(&record);
         const auto transaction = record.Active.Transaction;
         const auto abandoned = control_.AbandonTransaction(transaction);
@@ -491,6 +499,46 @@ class Coordinator final {
         const auto terminal = CoordinatorDetail::TerminalOutcomeFor(failure);
         return PublishTerminal(record, transaction, terminal, UpdateOperation::Acquire, failure)
             ? failure : ProjectionFailure();
+    }
+
+    Result RetryAcquisitionSource(
+        OTAControlRecord<TCapacityProfile>& record,
+        const Result& failure) noexcept {
+        if (artifactSourceSelector_ == nullptr) return FailAcquisition(record, failure);
+        if (acquisitionSourceAttempt_ >= maximumArtifactSourceAttempts_) {
+            return FailAcquisition(record, CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::ArtifactSourceRetryExhausted));
+        }
+        if (verifiedManifest_ == nullptr || acquisitionArtifactIndex_ >= verifiedManifest_->Artifacts.size()) {
+            return RecoveryRequired(&record);
+        }
+
+        const auto& artifact = verifiedManifest_->Artifacts[acquisitionArtifactIndex_];
+        ArtifactSourceSelectionContext context;
+        context.Transaction = record.Active.Transaction;
+        context.Artifact = ArtifactIdentifier{artifact.Identifier};
+        context.ExpectedLength = artifact.ExpectedLength;
+        context.Attempt = acquisitionSourceAttempt_ + 1U;
+        context.AcceptedCheckpointPrefix = acquisition_.CheckpointedBytes();
+        context.HasPreviousFailure = true;
+        context.PreviousFailure = failure;
+
+        ArtifactSourceSelection selection;
+        const auto selected = artifactSourceSelector_->Select(context, selection);
+        if (selected.Outcome == OutcomeClass::Pending || selected.Outcome == OutcomeClass::Deferred) {
+            return selected;
+        }
+        if (!selected) return FailAcquisition(record, selected);
+        if (!selection) {
+            return FailAcquisition(record, CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::ArtifactSourceSelectionFailed));
+        }
+
+        ++acquisitionSourceAttempt_;
+        const auto retry = acquisition_.RetryWithSource(*selection.Source, selection.OffsetRead);
+        if (retry.Outcome == OutcomeClass::Pending || retry.Outcome == OutcomeClass::Deferred) return retry;
+        if (!retry) return FailAcquisition(record, retry);
+        return {OutcomeClass::Pending, {}};
     }
 
     Result AdvanceAcquisition(OTAControlRecord<TCapacityProfile>& record) noexcept {
@@ -519,9 +567,11 @@ class Coordinator final {
                 record.Active.Transaction, verifiedManifest_->Artifacts[acquisitionArtifactIndex_]);
             if (begun.Outcome != OutcomeClass::Pending) return FailAcquisition(record, begun);
             acquisitionStarted_ = true;
+            acquisitionSourceAttempt_ = 1U;
             if (!PublishActive(record, UpdateLifecycle::Acquiring, false)) {
                 (void)acquisition_.Abort();
                 acquisitionStarted_ = false;
+                acquisitionSourceAttempt_ = 0U;
                 return ProjectionFailure();
             }
             return begun;
@@ -530,11 +580,15 @@ class Coordinator final {
         const auto step = acquisition_.Advance();
         if (acquisition_.IsComplete()) {
             acquisitionStarted_ = false;
+            acquisitionSourceAttempt_ = 0U;
             ++acquisitionArtifactIndex_;
             return {OutcomeClass::Pending, {}};
         }
         if (acquisition_.Phase() == ArtifactAcquisitionPhase::Failed) {
             return FailAcquisition(record, step);
+        }
+        if (acquisition_.Phase() == ArtifactAcquisitionPhase::SourceFailed) {
+            return RetryAcquisitionSource(record, step);
         }
         if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
         if (!step) return FailAcquisition(record, step);
@@ -840,8 +894,58 @@ public:
           trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
 
+    Coordinator(ControlStore& control,
+                OTAStateOwners& states,
+                TBootControl& boot,
+                TTrialBoot& trial,
+                TRestart& restart,
+                TClock& clock,
+                ActivatePolicies& activatePolicies,
+                HealthChecks& health,
+                ComponentHandlerDirectory<TCapacityProfile>& handlers,
+                IArtifactSource& artifactSource,
+                bool artifactSourceOffsetRead,
+                IReadableArtifactStore& artifactStore,
+                IPartialArtifactStore& partialArtifactStore,
+                ArtifactCheckpointStore<TCapacityProfile>& artifactCheckpoints,
+                ArtifactTransferWorkspace<TCapacityProfile>& artifactWorkspace,
+                Security::IStreamingDigestVerifier& digestVerifier,
+                std::uint64_t trialTimeoutNanoseconds,
+                std::uint64_t healthReevaluationNanoseconds = 0U) noexcept
+        : control_(control), states_(states), boot_(boot), trial_(trial), restart_(restart), clock_(clock),
+          activatePolicies_(activatePolicies), health_(health), handlers_(handlers),
+          acquisition_(artifactSource, artifactSourceOffsetRead, artifactStore, partialArtifactStore,
+                       artifactCheckpoints, artifactWorkspace),
+          verification_(artifactStore, digestVerifier, artifactWorkspace),
+          staging_(artifactStore, stagePolicies_),
+          componentLifecycle_(artifactStore),
+          trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
+          healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
+
     PolicyGateRegistrationStatus AddStagePolicy(IPolicyGate<StagePolicyDecisionPoint>& gate) noexcept {
         return stagePolicies_.Add(gate);
+    }
+
+    Result ConfigureArtifactSourceSelection(
+        IArtifactSourceSelector& selector,
+        std::size_t maximumAttempts) noexcept {
+        MutationGuard guard{*this};
+        if (!guard) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
+        }
+        if (maximumAttempts == 0U) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Invalid, CoordinatorCoreReason::InvalidConfiguration);
+        }
+        if (status_.HasActiveTransaction || acquisitionStarted_ || acquisition_.IsActive()) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::Busy);
+        }
+        artifactSourceSelector_ = &selector;
+        maximumArtifactSourceAttempts_ = maximumAttempts;
+        acquisitionSourceAttempt_ = 0U;
+        return Result::Success();
     }
 
     Result Initialize() noexcept {
@@ -969,6 +1073,7 @@ public:
         verifiedManifestBound_ = true;
         acquisitionArtifactIndex_ = 0U;
         acquisitionStarted_ = false;
+        acquisitionSourceAttempt_ = 0U;
         verificationArtifactIndex_ = 0U;
         verificationStarted_ = false;
         staging_.Reset();
@@ -1041,6 +1146,7 @@ public:
                 const auto aborted = acquisition_.Abort();
                 if (!aborted) return RecoveryRequired(&record);
                 acquisitionStarted_ = false;
+                acquisitionSourceAttempt_ = 0U;
             }
             if (verificationStarted_ || verification_.IsActive()) {
                 verification_.Abort();
