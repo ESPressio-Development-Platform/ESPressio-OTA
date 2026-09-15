@@ -497,12 +497,12 @@ public:
             return;
         }
         const auto written = ImageStaging.WriteApplicationImage(CloneBuffer.data(), bytes);
-        if (!written || written.Bytes != bytes) {
+        if (!written || written.ConsumedBytes != bytes) {
             (void)ImageStaging.AbortApplicationImage();
             Clone = CloneState::Failed;
             Serial.printf("clone failed: target write status=%u bytes=%u\n",
                           static_cast<unsigned>(written.Code),
-                          static_cast<unsigned>(written.Bytes));
+                          static_cast<unsigned>(written.ConsumedBytes));
             return;
         }
         CloneOffset += bytes;
