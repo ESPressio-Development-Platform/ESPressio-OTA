@@ -17,9 +17,15 @@ struct ClockBackend final : Platform::Backend {};
 class SizeBootControl final : public Platform::ProviderDeclaration<
     BootBackend, Platform::CapabilitySet<Platform::Capability::BootControl>> {
 public:
-    Platform::OTA::BootTargetIdentifier CurrentBootTarget() const noexcept { return {1U}; }
-    Platform::OTA::BootTargetIdentifier CommittedBootTarget() const noexcept { return {1U}; }
-    Platform::OTA::BootTargetIdentifier NextBootTarget() const noexcept { return {1U}; }
+    Platform::OTA::BootTargetIdentifier CurrentBootTarget() const noexcept {
+        return Platform::OTA::BootTargetIdentifier{1U};
+    }
+    Platform::OTA::BootTargetIdentifier CommittedBootTarget() const noexcept {
+        return Platform::OTA::BootTargetIdentifier{1U};
+    }
+    Platform::OTA::BootTargetIdentifier NextBootTarget() const noexcept {
+        return Platform::OTA::BootTargetIdentifier{1U};
+    }
     Platform::OTA::Result SelectNextBootTarget(Platform::OTA::BootTargetIdentifier) noexcept {
         return {Platform::OTA::Status::Success, 0};
     }
