@@ -1,1 +1,1 @@
-Transient trigger for coordinator cancellation diagnostics.
+Transient trigger for coordinator diagnostics after explicit State fixture shutdown.
