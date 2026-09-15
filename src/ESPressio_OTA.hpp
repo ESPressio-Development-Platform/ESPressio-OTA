@@ -19,3 +19,4 @@
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAPolicyHealth.hpp"
 #include "ESPressio_OTAState.hpp"
+#include "ESPressio_OTACoordinator.hpp"
