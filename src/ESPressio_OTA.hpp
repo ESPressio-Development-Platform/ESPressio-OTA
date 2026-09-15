@@ -17,6 +17,7 @@
 #include "ESPressio_OTACatalog.hpp"
 #include "ESPressio_OTACheckpoint.hpp"
 #include "ESPressio_OTAAcquisition.hpp"
+#include "ESPressio_OTAVerification.hpp"
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAPolicyHealth.hpp"
 #include "ESPressio_OTAState.hpp"
