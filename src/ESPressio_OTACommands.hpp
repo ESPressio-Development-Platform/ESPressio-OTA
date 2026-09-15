@@ -27,7 +27,7 @@ enum class OTACommandOperation : std::uint8_t {
 class IOTACommandAuthorizer {
 public:
     virtual ~IOTACommandAuthorizer() = default;
-    virtual bool AuthorizeRemote(const Command::CommandExecutionContext& context,
+    virtual bool AuthorizeRemote(const ESPressio::Command::CommandExecutionContext& context,
                                  OTACommandOperation operation) const noexcept = 0;
 };
 
@@ -50,7 +50,7 @@ struct OTACommandDeliveryPolicy final {
 struct OTACommandCompletionRetention final {
     static constexpr std::size_t MaximumTrackedOrigins = 4U;
     static constexpr std::size_t ReplayWindowEntries = 8U;
-    using ResultRetention = Command::PersistentResults<4U, 512U>;
+    using ResultRetention = ESPressio::Command::PersistentResults<4U, 512U>;
 };
 
 /** Bounded immediate Command result; long-running completion remains in OTA State/Event. */
@@ -93,13 +93,13 @@ struct OTACommandResultValue final : Serializable::SerializableBase<OTACommandRe
 };
 
 struct StartUpdateCommand final
-    : Command::TransmissibleCommand<StartUpdateCommand, OTACommandResultValue> {
-    static constexpr Command::CommandTypeId TypeId{0x45534F5441430001ULL};
+    : ESPressio::Command::TransmissibleCommand<StartUpdateCommand, OTACommandResultValue> {
+    static constexpr ESPressio::Command::CommandTypeId TypeId{0x45534F5441430001ULL};
     static constexpr std::string_view CanonicalName{"ESPressio.OTA.Command.StartUpdate"};
     static constexpr std::size_t MaximumLiveInstances = 2U;
     static constexpr std::size_t MaximumPendingExecutions = 1U;
     static constexpr std::size_t MaximumPendingResponses = 2U;
-    using ExecutionAdmissionPolicy = Command::RequiredExecution;
+    using ExecutionAdmissionPolicy = ESPressio::Command::RequiredExecution;
     using RequestDeliveryPolicy = OTACommandDeliveryPolicy;
     using ResponseDeliveryPolicy = OTACommandDeliveryPolicy;
     using CompletionRetentionPolicy = OTACommandCompletionRetention;
@@ -124,13 +124,13 @@ struct StartUpdateCommand final
 };
 
 struct CancelUpdateCommand final
-    : Command::TransmissibleCommand<CancelUpdateCommand, OTACommandResultValue> {
-    static constexpr Command::CommandTypeId TypeId{0x45534F5441430002ULL};
+    : ESPressio::Command::TransmissibleCommand<CancelUpdateCommand, OTACommandResultValue> {
+    static constexpr ESPressio::Command::CommandTypeId TypeId{0x45534F5441430002ULL};
     static constexpr std::string_view CanonicalName{"ESPressio.OTA.Command.CancelUpdate"};
     static constexpr std::size_t MaximumLiveInstances = 2U;
     static constexpr std::size_t MaximumPendingExecutions = 1U;
     static constexpr std::size_t MaximumPendingResponses = 2U;
-    using ExecutionAdmissionPolicy = Command::RequiredExecution;
+    using ExecutionAdmissionPolicy = ESPressio::Command::RequiredExecution;
     using RequestDeliveryPolicy = OTACommandDeliveryPolicy;
     using ResponseDeliveryPolicy = OTACommandDeliveryPolicy;
     using CompletionRetentionPolicy = OTACommandCompletionRetention;
