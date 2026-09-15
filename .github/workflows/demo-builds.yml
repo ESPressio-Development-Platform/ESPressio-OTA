@@ -1,4 +1,4 @@
-name: OTA Trial Recovery Patch Carrier
+name: OTA Trial Recovery Test Patch Carrier
 
 on:
   push:
@@ -15,35 +15,106 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ota_v1
-      - name: Apply rollback target normalization
+      - name: Add rejected-trial regression coverage
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('src/ESPressio_OTACoordinator.hpp')
+          p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
           s = p.read_text()
-          marker = 'const auto selected = CoordinatorDetail::PlatformResult(\n                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));'
-          if marker not in s:
-              old = '            if (current == record.Active.PreviousCommittedBootTarget) {\n                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
-              lines = [
-                  '            if (current == record.Active.PreviousCommittedBootTarget) {',
-                  '                if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {',
-                  '                    const auto selected = CoordinatorDetail::PlatformResult(',
-                  '                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));',
-                  '                    if (selected.Outcome != OutcomeClass::Success) return selected;',
-                  '                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();',
-                  '                    return {OutcomeClass::Pending, {}};',
-                  '                }',
-                  '                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
-              ]
-              if old not in s: raise SystemExit('Rollback previous-target branch not found')
-              s = s.replace(old, '\n'.join(lines), 1)
+
+          if 'Platform::OTA::TrialBootState CandidateState' not in s:
+              old = '''    bool Trial{false};
+              Platform::OTA::Status MarkValidStatus{Platform::OTA::Status::Success};'''
+              new = '''    bool Trial{false};
+              Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};
+              Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};
+              mutable std::size_t InspectCalls{0U};
+              Platform::OTA::Status MarkValidStatus{Platform::OTA::Status::Success};'''
+              if old not in s: raise SystemExit('FaultTrialBoot field anchor not found')
+              s = s.replace(old, new, 1)
+
+          if 'InspectBootTargetTrialState' not in s:
+              anchor = '    Platform::OTA::Result MarkCurrentBootValid() noexcept {'
+              method = '''    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
+                  Platform::OTA::BootTargetIdentifier target) const noexcept {
+                  ++InspectCalls;
+                  if (!target) {
+                      return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
+                  }
+                  return {
+                      InspectStatus,
+                      InspectStatus == Platform::OTA::Status::Success
+                          ? CandidateState
+                          : Platform::OTA::TrialBootState::Unknown,
+                      InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
+              }
+'''
+              if anchor not in s: raise SystemExit('FaultTrialBoot method anchor not found')
+              s = s.replace(anchor, method + anchor, 1)
+
+          if 'rejected Trial candidate must never be blindly re-armed' not in s:
+              anchor = '''    }
+          #elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2'''
+              regression = '''    }
+
+              // A candidate that had entered Trial and was rejected by the bootloader
+              // must never be blindly re-armed from recovered ActivationArmed state.
+              {
+                  Fixture fixture;
+                  if (!fixture.InitializeRuntime()) return 51;
+                  ActiveTransactionRecord active;
+                  if (!fixture.CreateStaged(11U, active)) return 52;
+                  const auto manifest = CandidateManifest(11U);
+                  if (fixture.Control.ArmActivation(
+                          active.Transaction,
+                          Platform::OTA::BootTargetIdentifier{2U},
+                          Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 53;
+                  fixture.Handler.Recovery = ComponentRecoveryState::Activated;
+                  fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
+                  fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
+                  fixture.Trial.CandidateState = Platform::OTA::TrialBootState::Rejected;
+
+                  auto coordinator = fixture.MakeCoordinator();
+                  if (!coordinator.Initialize() ||
+                      !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 54;
+                  const auto rejected = coordinator.Advance();
+                  if (rejected.Outcome != OutcomeClass::Failed ||
+                      rejected.Detail.Reason != static_cast<std::uint32_t>(CoordinatorCoreReason::CandidateTrialRejected) ||
+                      fixture.Boot.SelectCalls != 0U ||
+                      fixture.Trial.InspectCalls != 1U) return 55;
+
+                  OTAControlRecord<Capacity> record;
+                  if (!LoadActive(fixture, record) ||
+                      record.Intent != DurableIntent::RollbackIntent ||
+                      record.Committed.Generation != UpdateGenerationId{1U}) return 56;
+
+                  // Even if next-boot somehow still names the rejected candidate,
+                  // rollback must normalize it to the previous committed target
+                  // before durable rollback state can be finalized.
+                  fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{2U};
+                  const auto normalize = coordinator.Advance();
+                  if (normalize.Outcome != OutcomeClass::Pending ||
+                      fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
+                      fixture.Boot.SelectCalls != 1U) return 57;
+                  if (!LoadActive(fixture, record) ||
+                      record.Intent != DurableIntent::RollbackIntent) return 58;
+
+                  if (!coordinator.Advance()) return 59;
+                  if (fixture.Control.Load(record) != OTADurableStatus::Success ||
+                      record.HasActiveTransaction ||
+                      record.Committed.Generation != UpdateGenerationId{1U}) return 60;
+              }
+          #elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2'''
+              if anchor not in s: raise SystemExit('scenario-1 closing anchor not found')
+              s = s.replace(anchor, regression, 1)
+
           p.write_text(s)
           PY
-      - name: Commit source fix
+      - name: Commit regression coverage
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/ESPressio_OTACoordinator.hpp
+          git add tests/ota_coordinator_platform_recovery_test.cpp
           git diff --cached --quiet && exit 0
-          git commit -m "fix: normalize rollback boot target before finalizing"
+          git commit -m "test: cover rejected OTA trial recovery"
           git push origin HEAD:ota_v1
