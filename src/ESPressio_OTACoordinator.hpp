@@ -47,7 +47,8 @@ enum class CoordinatorCoreReason : std::uint32_t {
     CandidateManifestSchemaUnsupported,
     StateProjectionFailed,
     ArtifactSourceSelectionFailed,
-    ArtifactSourceRetryExhausted
+    ArtifactSourceRetryExhausted,
+    CandidateTrialRejected
 };
 
 struct CoordinatorStartRequest final {
@@ -275,6 +276,7 @@ class Coordinator final {
     bool healthEvaluated_{false};
     bool activationRestartIssued_{false};
     bool rollbackRestartIssued_{false};
+    bool activationRecovered_{false};
 
     class MutationGuard final {
         Coordinator& owner_;
@@ -416,6 +418,7 @@ class Coordinator final {
         componentLifecycle_.Reset();
         activationRestartIssued_ = false;
         rollbackRestartIssued_ = false;
+        activationRecovered_ = false;
         verifiedManifestBound_ = false;
         verifiedManifest_ = nullptr;
         targetProfile_ = nullptr;
@@ -970,7 +973,9 @@ public:
             if (current == record.Active.CandidateBootTarget) {
                 if (!trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
                 executingCandidate = true;
-            } else if (current != record.Active.PreviousCommittedBootTarget) {
+            } else if (current == record.Active.PreviousCommittedBootTarget) {
+                activationRecovered_ = true;
+            } else {
                 return RecoveryRequired(&record);
             }
             lifecycle = UpdateLifecycle::Activating;
@@ -1224,6 +1229,7 @@ public:
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
         componentLifecycle_.Reset();
         activationRestartIssued_ = false;
+        activationRecovered_ = false;
         if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();
         return {OutcomeClass::Pending, {}};
     }
@@ -1239,6 +1245,31 @@ public:
         if (!record.HasActiveTransaction) return Result::Success();
 
         if (record.Intent == DurableIntent::ActivationArmed) {
+            if (activationRecovered_) {
+                if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {
+                    return RecoveryRequired(&record);
+                } else {
+                    const auto inspected = trial_.InspectBootTargetTrialState(
+                        record.Active.CandidateBootTarget);
+                    if (!inspected) return RecoveryRequired(&record);
+                    switch (inspected.State) {
+                        case Platform::OTA::TrialBootState::NeverAttempted:
+                        case Platform::OTA::TrialBootState::Armed:
+                            activationRecovered_ = false;
+                            break;
+                        case Platform::OTA::TrialBootState::Rejected:
+                            activationRecovered_ = false;
+                            return StartRollback(record, CoordinatorDetail::CoreResult(
+                                OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));
+                        case Platform::OTA::TrialBootState::Unknown:
+                        case Platform::OTA::TrialBootState::Untracked:
+                        case Platform::OTA::TrialBootState::PendingValidation:
+                        case Platform::OTA::TrialBootState::Accepted:
+                            return RecoveryRequired(&record);
+                    }
+                }
+            }
+
             const auto componentStep = AdvanceComponentLifecycle(
                 record, ComponentLifecycleOperation::Activate);
             if (componentStep.Outcome == OutcomeClass::Pending ||
