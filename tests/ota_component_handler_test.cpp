@@ -406,8 +406,11 @@ int main() {
     if (!PreflightUpdatePlan(plan, profile, UpdateTransactionId{1U}, UpdateGenerationId{2U})) return 34;
     if (handlerA.PreflightCalls != 1U || handlerB.PreflightCalls != 1U) return 35;
 
-    ComponentStagingSession<Capacity> staging{store};
-    if (staging.Begin(manifest, plan, profile, UpdateTransactionId{1U}, UpdateGenerationId{2U}).Outcome != OutcomeClass::Pending) return 36;
+    using StagePolicies = PolicyGateSet<StagePolicyDecisionPoint, Capacity::MaximumPolicyProvidersPerDecisionPoint>;
+    StagePolicies stagePolicies;
+    ComponentStagingSession<Capacity> staging{store, stagePolicies};
+    if (staging.Begin(manifest, plan, profile, UpdateTransactionId{1U}, UpdateGenerationId{2U},
+                      UpdateGenerationId{1U}).Outcome != OutcomeClass::Pending) return 36;
     for (std::size_t step = 0U; step < 32U && !staging.IsComplete(); ++step) {
         const auto result = staging.Advance();
         if (result.Outcome != OutcomeClass::Pending && result.Outcome != OutcomeClass::Success) return 37;
@@ -421,8 +424,9 @@ int main() {
     trace.Count = 0U;
     handlerA.Recovery = ComponentRecoveryState::Staged;
     handlerB.Recovery = ComponentRecoveryState::NotPrepared;
-    ComponentStagingSession<Capacity> recovered{store};
-    if (recovered.Begin(manifest, plan, profile, UpdateTransactionId{1U}, UpdateGenerationId{2U}, true).Outcome != OutcomeClass::Pending) return 41;
+    ComponentStagingSession<Capacity> recovered{store, stagePolicies};
+    if (recovered.Begin(manifest, plan, profile, UpdateTransactionId{1U}, UpdateGenerationId{2U},
+                        UpdateGenerationId{1U}, true).Outcome != OutcomeClass::Pending) return 41;
     if (recovered.ComponentIndex() != 1U || recovered.Phase() != ComponentStagingPhase::Preparing) return 42;
     for (std::size_t step = 0U; step < 8U && !recovered.IsComplete(); ++step) {
         const auto result = recovered.Advance();
