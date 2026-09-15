@@ -67,6 +67,11 @@ target_link_libraries(espressio_ota_acquisition_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_acquisition_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
 add_test(NAME espressio_ota_acquisition_test COMMAND espressio_ota_acquisition_test)
 
+add_executable(espressio_ota_verification_test ota_verification_test.cpp)
+target_link_libraries(espressio_ota_verification_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_verification_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+add_test(NAME espressio_ota_verification_test COMMAND espressio_ota_verification_test)
+
 add_executable(espressio_ota_coordinator_test ota_coordinator_test.cpp)
 target_link_libraries(espressio_ota_coordinator_test PRIVATE ESPressio::OTA)
 target_compile_options(espressio_ota_coordinator_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
@@ -107,6 +112,7 @@ set(ESPRESSIO_OTA_NATIVE_TEST_TARGETS
     espressio_ota_state_test
     espressio_ota_policy_health_test
     espressio_ota_acquisition_test
+    espressio_ota_verification_test
     espressio_ota_coordinator_test
     espressio_ota_coordinator_activation_test
     espressio_ota_coordinator_rollback_test
