@@ -1,92 +1,111 @@
-name: OTA Demo Builds
+name: OTA Trial Recovery Patch Carrier
 
 on:
   push:
     branches:
       - ota_v1
-  pull_request:
+
+permissions:
+  contents: write
 
 jobs:
-  demos:
+  patch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-
-      # PlatformIO Core 6.2.0 currently conflicts with PIOArduino's ESP-IDF
-      # tool-scons package declaration and may delete/reinstall SCons mid-build,
-      # producing SCons.Tool.FortranCommon import failures unrelated to OTA.
-      - name: Install PlatformIO
-        run: python -m pip install "platformio==6.1.19"
-
-      - name: Build ESP32 Arduino PlatformIO provider-readiness demo
-        run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
-
-      - name: Build ESP-IDF PlatformIO provider-readiness demo
-        run: pio run --project-dir demos/ota_espidf_provider_readiness/platformio
-
-      - name: Build exact ESP32 Arduino IDE provider-readiness sketch source
-        shell: bash
+          ref: ota_v1
+      - name: Apply recovery fix
         run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-arduino-ide"
-          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_provider_readiness/arduino_ide/ota_esp32_provider_readiness/ota_esp32_provider_readiness.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/ESPressio_OTACoordinator.hpp')
+          s = p.read_text()
+          s = s.replace('    ArtifactSourceRetryExhausted\n};', '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1) if 'CandidateTrialRejected' not in s else s
+          s = s.replace('    bool rollbackRestartIssued_{false};\n', '    bool rollbackRestartIssued_{false};\n    bool activationRecovered_{false};\n', 1) if 'bool activationRecovered_' not in s else s
+          if '        activationRecovered_ = false;\n        verifiedManifestBound_ = false;' not in s:
+              s = s.replace('        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;', '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
+          if 'activationRecovered_ = true;' not in s:
+              old = '            } else if (current != record.Active.PreviousCommittedBootTarget) {\n                return RecoveryRequired(&record);\n            }'
+              new = '            } else if (current == record.Active.PreviousCommittedBootTarget) {\n                activationRecovered_ = true;\n            } else {\n                return RecoveryRequired(&record);\n            }'
+              if old not in s: raise SystemExit('Initialize activation branch not found')
+              s = s.replace(old, new, 1)
+          if 'activationRestartIssued_ = false;\n        activationRecovered_ = false;' not in s:
+              old = '        componentLifecycle_.Reset();\n        activationRestartIssued_ = false;\n        if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'
+              new = '        componentLifecycle_.Reset();\n        activationRestartIssued_ = false;\n        activationRecovered_ = false;\n        if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'
+              if old not in s: raise SystemExit('BeginActivation reset not found')
+              s = s.replace(old, new, 1)
+          if 'const auto inspected = trial_.InspectBootTargetTrialState' not in s:
+              old = '        if (record.Intent == DurableIntent::ActivationArmed) {\n            const auto componentStep = AdvanceComponentLifecycle(\n                record, ComponentLifecycleOperation::Activate);'
+              new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
+            if (activationRecovered_) {
+                if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {
+                    return RecoveryRequired(&record);
+                } else {
+                    const auto inspected = trial_.InspectBootTargetTrialState(
+                        record.Active.CandidateBootTarget);
+                    if (!inspected) return RecoveryRequired(&record);
+                    switch (inspected.State) {
+                        case Platform::OTA::TrialBootState::NeverAttempted:
+                        case Platform::OTA::TrialBootState::Armed:
+                            activationRecovered_ = false;
+                            break;
+                        case Platform::OTA::TrialBootState::Rejected:
+                            activationRecovered_ = false;
+                            return StartRollback(record, CoordinatorDetail::CoreResult(
+                                OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));
+                        case Platform::OTA::TrialBootState::Unknown:
+                        case Platform::OTA::TrialBootState::Untracked:
+                        case Platform::OTA::TrialBootState::PendingValidation:
+                        case Platform::OTA::TrialBootState::Accepted:
+                            return RecoveryRequired(&record);
+                    }
+                }
+            }
 
-      - name: Build exact ESP-IDF-provider Arduino IDE sketch source
-        shell: bash
+            const auto componentStep = AdvanceComponentLifecycle(
+                record, ComponentLifecycleOperation::Activate);'''
+              if old not in s: raise SystemExit('ActivationArmed advance block not found')
+              s = s.replace(old, new, 1)
+          if 'if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget)' not in s:
+              old = '            if (current == record.Active.PreviousCommittedBootTarget) {\n                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
+              new = '''            if (current == record.Active.PreviousCommittedBootTarget) {
+                if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
+                    const auto selected = CoordinatorDetail::PlatformResult(
+                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+                    if (selected.Outcome != OutcomeClass::Success) return selected;
+                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
+                    return {OutcomeClass::Pending, {}};
+                }
+                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
+              if old not in s: raise SystemExit('Rollback normalization block not found')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
+          s = p.read_text()
+          if 'Platform::OTA::TrialBootState CandidateState' not in s:
+              s = s.replace('    bool Trial{false};\n', '    bool Trial{false};\n    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};\n    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};\n    mutable std::size_t InspectCalls{0U};\n', 1)
+          if 'InspectBootTargetTrialState' not in s:
+              anchor = '    Platform::OTA::Result MarkCurrentBootValid() noexcept {'
+              method = '''    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
+        Platform::OTA::BootTargetIdentifier target) const noexcept {
+        ++InspectCalls;
+        if (!target) return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
+        return {InspectStatus,
+                InspectStatus == Platform::OTA::Status::Success ? CandidateState : Platform::OTA::TrialBootState::Unknown,
+                InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
+    }
+'''
+              if anchor not in s: raise SystemExit('FaultTrialBoot anchor not found')
+              s = s.replace(anchor, method + anchor, 1)
+          p.write_text(s)
+          PY
+      - name: Commit source fix
         run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-espidf-arduino-ide"
-          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_espidf_provider_readiness/arduino_ide/ota_espidf_provider_readiness/ota_espidf_provider_readiness.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
-
-      - name: Build ESP32 physical-validation PlatformIO harness
-        run: pio run --project-dir demos/ota_esp32_physical_validation/platformio
-
-      - name: Build exact ESP32 physical-validation Arduino IDE sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-physical-arduino-ide"
-          cp -R demos/ota_esp32_physical_validation/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_physical_validation/arduino_ide/ota_esp32_physical_validation/ota_esp32_physical_validation.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
-
-      - name: Build ESP32 Coordinator-recovery PlatformIO harness
-        run: pio run -e esp32dev --project-dir demos/ota_esp32_coordinator_recovery/platformio
-
-      - name: Build exact ESP32 Coordinator-recovery Arduino IDE sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-coordinator-recovery-arduino-ide"
-          cp -R demos/ota_esp32_coordinator_recovery/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_coordinator_recovery/arduino_ide/ota_esp32_coordinator_recovery/ota_esp32_coordinator_recovery.ino \
-             "${project}/src/main.cpp"
-          pio run -e esp32dev --project-dir "${project}"
-
-      - name: Build and verify ESP32 Coordinator-recovery rollback bootloader harness
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="demos/ota_esp32_coordinator_recovery/platformio"
-          pio run -e esp32dev-rollback --project-dir "${project}"
-          grep -Fx 'CONFIG_AUTOSTART_ARDUINO=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_FREERTOS_HZ=1000' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_COMPILER_CXX_EXCEPTIONS=y' "${project}/sdkconfig.esp32dev-rollback"
-          test -s "${project}/.pio/build/esp32dev-rollback/bootloader.bin"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/ESPressio_OTACoordinator.hpp tests/ota_coordinator_platform_recovery_test.cpp
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: reconcile rejected OTA trial candidates"
+          git push origin HEAD:ota_v1
