@@ -682,18 +682,26 @@ int main() {
 
         const auto cancellation = coordinator.Cancel(transaction);
         if (cancellation.Outcome != OutcomeClass::Pending || coordinator.Status().Lifecycle != UpdateLifecycle::RollbackPending) return 60;
+        // The running Trial candidate must be invalidated before selecting the
+        // previous target. ESP-IDF couples invalidation to OTA-data state, so
+        // selecting the old target first can cause the wrong slot to be invalidated.
         if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
-            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
-            fixture.ComponentHandler.RollbackCalls != 1U) return 61;
-        if (coordinator.Advance().Outcome != OutcomeClass::Pending || fixture.Trial.MarkInvalidCalls != 1U) return 62;
+            fixture.ComponentHandler.RollbackCalls != 1U ||
+            fixture.Trial.MarkInvalidCalls != 1U || fixture.Trial.Trial ||
+            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 61;
+        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
+            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 62;
+        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
+            fixture.Restart.Calls != 1U ||
+            fixture.Restart.Last != Platform::OTA::RestartReason::Rollback) return 63;
         fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
         fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
-        if (!coordinator.Advance()) return 63;
-        if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 64;
+        if (!coordinator.Advance()) return 64;
+        if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 65;
         OTAControlRecord<Capacity> rolledBack;
         if (fixture.Control.Load(rolledBack) != OTADurableStatus::Success || rolledBack.HasActiveTransaction ||
             rolledBack.Committed.Generation != UpdateGenerationId{1U} ||
-            rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 65;
+            rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 66;
     }
 
 #elif ESPRESSIO_OTA_COORDINATOR_SCENARIO == 4
