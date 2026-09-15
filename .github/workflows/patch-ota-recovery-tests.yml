@@ -24,134 +24,132 @@ jobs:
 
           p = Path('tests/ota_coordinator_test.cpp')
           s = p.read_text()
-          old = '''        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
-              fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
-              fixture.ComponentHandler.RollbackCalls != 1U) return 61;
-          if (coordinator.Advance().Outcome != OutcomeClass::Pending || fixture.Trial.MarkInvalidCalls != 1U) return 62;
-          fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
-          fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
-          if (!coordinator.Advance()) return 63;
-          if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 64;
-          OTAControlRecord<Capacity> rolledBack;
-          if (fixture.Control.Load(rolledBack) != OTADurableStatus::Success || rolledBack.HasActiveTransaction ||
-              rolledBack.Committed.Generation != UpdateGenerationId{1U} ||
-              rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 65;'''
-          new = '''        // The running Trial candidate must be invalidated before selecting the
-          // previous target. ESP-IDF couples invalidation to OTA-data state, so
-          // selecting the old target first can cause the wrong slot to be invalidated.
-          if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
-              fixture.ComponentHandler.RollbackCalls != 1U ||
-              fixture.Trial.MarkInvalidCalls != 1U || fixture.Trial.Trial ||
-              fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 61;
-          if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
-              fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 62;
-          if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
-              fixture.Restart.Calls != 1U ||
-              fixture.Restart.Last != Platform::OTA::RestartReason::Rollback) return 63;
-          fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
-          fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
-          if (!coordinator.Advance()) return 64;
-          if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 65;
-          OTAControlRecord<Capacity> rolledBack;
-          if (fixture.Control.Load(rolledBack) != OTADurableStatus::Success || rolledBack.HasActiveTransaction ||
-              rolledBack.Committed.Generation != UpdateGenerationId{1U} ||
-              rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 66;'''
-          if old not in s:
-              raise SystemExit('coordinator rollback expectation block not found')
+          old = (
+              "        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||\n"
+              "            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||\n"
+              "            fixture.ComponentHandler.RollbackCalls != 1U) return 61;\n"
+              "        if (coordinator.Advance().Outcome != OutcomeClass::Pending || fixture.Trial.MarkInvalidCalls != 1U) return 62;\n"
+              "        fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};\n"
+              "        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};\n"
+              "        if (!coordinator.Advance()) return 63;\n"
+              "        if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 64;\n"
+              "        OTAControlRecord<Capacity> rolledBack;\n"
+              "        if (fixture.Control.Load(rolledBack) != OTADurableStatus::Success || rolledBack.HasActiveTransaction ||\n"
+              "            rolledBack.Committed.Generation != UpdateGenerationId{1U} ||\n"
+              "            rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 65;"
+          )
+          new = (
+              "        // The running Trial candidate must be invalidated before selecting the\n"
+              "        // previous target. ESP-IDF couples invalidation to OTA-data state, so\n"
+              "        // selecting the old target first can cause the wrong slot to be invalidated.\n"
+              "        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||\n"
+              "            fixture.ComponentHandler.RollbackCalls != 1U ||\n"
+              "            fixture.Trial.MarkInvalidCalls != 1U || fixture.Trial.Trial ||\n"
+              "            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 61;\n"
+              "        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||\n"
+              "            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 62;\n"
+              "        if (coordinator.Advance().Outcome != OutcomeClass::Pending ||\n"
+              "            fixture.Restart.Calls != 1U ||\n"
+              "            fixture.Restart.Last != Platform::OTA::RestartReason::Rollback) return 63;\n"
+              "        fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};\n"
+              "        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};\n"
+              "        if (!coordinator.Advance()) return 64;\n"
+              "        if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 65;\n"
+              "        OTAControlRecord<Capacity> rolledBack;\n"
+              "        if (fixture.Control.Load(rolledBack) != OTADurableStatus::Success || rolledBack.HasActiveTransaction ||\n"
+              "            rolledBack.Committed.Generation != UpdateGenerationId{1U} ||\n"
+              "            rolledBack.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 66;"
+          )
+          if s.count(old) != 1:
+              raise SystemExit(f'coordinator rollback expectation block count={s.count(old)}')
           p.write_text(s.replace(old, new, 1))
 
           p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
           s = p.read_text()
-          old = '''        fixture.Trial.Trial = true;
-          fixture.Boot.SelectStatus = Platform::OTA::Status::Failed;
-
-          {
-              auto coordinator = fixture.MakeCoordinator();
-              if (!coordinator.Initialize() || !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 33;
-              const auto failed = coordinator.Advance();
-              if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Handler.RollbackCalls != 1U ||
-                  fixture.Handler.Recovery != ComponentRecoveryState::RolledBack) return 34;
-          }
-          OTAControlRecord<Capacity> record;
-          if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent ||
-              record.Committed.Generation != UpdateGenerationId{1U}) return 35;
-
-          fixture.Boot.SelectStatus = Platform::OTA::Status::Success;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 36;
-              if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Handler.RollbackCalls != 1U ||
-                  fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 37;
-          }
-
-          fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Failed;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 38;
-              const auto failed = recovered.Advance();
-              if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Trial.MarkInvalidCalls != 1U) return 39;
-          }
-          if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent) return 40;
-
-          fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Success;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 41;
-              if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Trial.Trial) return 42;
-          }
-
-          fixture.Restart.Status = Platform::OTA::Status::Failed;'''
-          new = '''        fixture.Trial.Trial = true;
-          fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Failed;
-
-          // Invalidation of the running Trial candidate is deliberately first.
-          // A failure here must leave RollbackIntent durable without selecting a
-          // different boot target.
-          {
-              auto coordinator = fixture.MakeCoordinator();
-              if (!coordinator.Initialize() || !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 33;
-              const auto failed = coordinator.Advance();
-              if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Handler.RollbackCalls != 1U ||
-                  fixture.Handler.Recovery != ComponentRecoveryState::RolledBack ||
-                  fixture.Trial.MarkInvalidCalls != 1U ||
-                  fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 34;
-          }
-          OTAControlRecord<Capacity> record;
-          if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent ||
-              record.Committed.Generation != UpdateGenerationId{1U}) return 35;
-
-          fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Success;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 36;
-              if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Handler.RollbackCalls != 1U ||
-                  fixture.Trial.Trial || fixture.Trial.MarkInvalidCalls != 2U ||
-                  fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 37;
-          }
-
-          fixture.Boot.SelectStatus = Platform::OTA::Status::Failed;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 38;
-              const auto failed = recovered.Advance();
-              if (failed.Outcome != OutcomeClass::PlatformFailed ||
-                  fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U} ||
-                  fixture.Boot.SelectCalls != 1U) return 39;
-          }
-          if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent) return 40;
-
-          fixture.Boot.SelectStatus = Platform::OTA::Status::Success;
-          {
-              auto recovered = fixture.MakeCoordinator();
-              if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 41;
-              if (recovered.Advance().Outcome != OutcomeClass::Pending ||
-                  fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
-                  fixture.Boot.SelectCalls != 2U) return 42;
-          }
-
-          fixture.Restart.Status = Platform::OTA::Status::Failed;'''
-          if old not in s:
-              raise SystemExit('platform rollback recovery block not found')
+          old = (
+              "        fixture.Trial.Trial = true;\n"
+              "        fixture.Boot.SelectStatus = Platform::OTA::Status::Failed;\n\n"
+              "        {\n"
+              "            auto coordinator = fixture.MakeCoordinator();\n"
+              "            if (!coordinator.Initialize() || !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 33;\n"
+              "            const auto failed = coordinator.Advance();\n"
+              "            if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Handler.RollbackCalls != 1U ||\n"
+              "                fixture.Handler.Recovery != ComponentRecoveryState::RolledBack) return 34;\n"
+              "        }\n"
+              "        OTAControlRecord<Capacity> record;\n"
+              "        if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent ||\n"
+              "            record.Committed.Generation != UpdateGenerationId{1U}) return 35;\n\n"
+              "        fixture.Boot.SelectStatus = Platform::OTA::Status::Success;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 36;\n"
+              "            if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Handler.RollbackCalls != 1U ||\n"
+              "                fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 37;\n"
+              "        }\n\n"
+              "        fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Failed;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 38;\n"
+              "            const auto failed = recovered.Advance();\n"
+              "            if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Trial.MarkInvalidCalls != 1U) return 39;\n"
+              "        }\n"
+              "        if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent) return 40;\n\n"
+              "        fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Success;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 41;\n"
+              "            if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Trial.Trial) return 42;\n"
+              "        }\n\n"
+              "        fixture.Restart.Status = Platform::OTA::Status::Failed;"
+          )
+          new = (
+              "        fixture.Trial.Trial = true;\n"
+              "        fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Failed;\n\n"
+              "        // Invalidation of the running Trial candidate is deliberately first.\n"
+              "        // A failure here must leave RollbackIntent durable without selecting a\n"
+              "        // different boot target.\n"
+              "        {\n"
+              "            auto coordinator = fixture.MakeCoordinator();\n"
+              "            if (!coordinator.Initialize() || !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 33;\n"
+              "            const auto failed = coordinator.Advance();\n"
+              "            if (failed.Outcome != OutcomeClass::PlatformFailed || fixture.Handler.RollbackCalls != 1U ||\n"
+              "                fixture.Handler.Recovery != ComponentRecoveryState::RolledBack ||\n"
+              "                fixture.Trial.MarkInvalidCalls != 1U ||\n"
+              "                fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 34;\n"
+              "        }\n"
+              "        OTAControlRecord<Capacity> record;\n"
+              "        if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent ||\n"
+              "            record.Committed.Generation != UpdateGenerationId{1U}) return 35;\n\n"
+              "        fixture.Trial.MarkInvalidStatus = Platform::OTA::Status::Success;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 36;\n"
+              "            if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Handler.RollbackCalls != 1U ||\n"
+              "                fixture.Trial.Trial || fixture.Trial.MarkInvalidCalls != 2U ||\n"
+              "                fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U}) return 37;\n"
+              "        }\n\n"
+              "        fixture.Boot.SelectStatus = Platform::OTA::Status::Failed;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 38;\n"
+              "            const auto failed = recovered.Advance();\n"
+              "            if (failed.Outcome != OutcomeClass::PlatformFailed ||\n"
+              "                fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{2U} ||\n"
+              "                fixture.Boot.SelectCalls != 1U) return 39;\n"
+              "        }\n"
+              "        if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent) return 40;\n\n"
+              "        fixture.Boot.SelectStatus = Platform::OTA::Status::Success;\n"
+              "        {\n"
+              "            auto recovered = fixture.MakeCoordinator();\n"
+              "            if (!recovered.Initialize() || !recovered.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 41;\n"
+              "            if (recovered.Advance().Outcome != OutcomeClass::Pending ||\n"
+              "                fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||\n"
+              "                fixture.Boot.SelectCalls != 2U) return 42;\n"
+              "        }\n\n"
+              "        fixture.Restart.Status = Platform::OTA::Status::Failed;"
+          )
+          if s.count(old) != 1:
+              raise SystemExit(f'platform rollback recovery block count={s.count(old)}')
           p.write_text(s.replace(old, new, 1))
           PY
 
