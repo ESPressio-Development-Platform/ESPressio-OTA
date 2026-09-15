@@ -171,7 +171,10 @@ int main() {
     if (afterRestart.AdvanceRecoveryPoint(first.Transaction, RecoveryPoint::ArtifactsVerified) != OTADurableStatus::Success) return 13;
     if (afterRestart.AdvanceRecoveryPoint(first.Transaction, RecoveryPoint::StagingStarted) != OTADurableStatus::Success) return 14;
     if (afterRestart.AdvanceRecoveryPoint(first.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 15;
-    if (afterRestart.ArmActivation(first.Transaction) != OTADurableStatus::Success) return 16;
+    if (afterRestart.ArmActivation(first.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{2U}, ESPressio::Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 16;
+    if (afterRestart.Load(loaded) != OTADurableStatus::Success ||
+        loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U} ||
+        loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{1U}) return 160;
     if (afterRestart.MarkTrialEntered(first.Transaction) != OTADurableStatus::Success) return 17;
     if (afterRestart.PersistCommitIntent(first.Transaction) != OTADurableStatus::Success) return 18;
 
@@ -186,6 +189,13 @@ int main() {
     ActiveTransactionRecord second;
     if (afterRestart.BeginTransaction(ReleaseIdentifier{20U}, ManifestIdentifier{Id(20U)}, SecurityGeneration{1U}, second) != OTADurableStatus::Success) return 22;
     if (second.Transaction != UpdateTransactionId{2U} || second.CandidateGeneration != UpdateGenerationId{3U}) return 23;
+    if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::InvalidTransition) return 230;
+    if (afterRestart.AdvanceRecoveryPoint(second.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 231;
+    if (afterRestart.ArmActivation(second.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{3U}, ESPressio::Platform::OTA::BootTargetIdentifier{3U}) != OTADurableStatus::Invalid) return 232;
+    if (afterRestart.ArmActivation(second.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{3U}, ESPressio::Platform::OTA::BootTargetIdentifier{2U}) != OTADurableStatus::Success) return 233;
+    if (afterRestart.Load(loaded) != OTADurableStatus::Success ||
+        loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{3U} ||
+        loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U}) return 234;
     if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::Success) return 24;
     if (afterRestart.FinalizeRollback(second.Transaction) != OTADurableStatus::Success) return 25;
     if (afterRestart.Load(loaded) != OTADurableStatus::Success || loaded.HasActiveTransaction ||

@@ -10,6 +10,7 @@
 #include "ESPressio_OTACheckpoint.hpp"
 #include "ESPressio_OTATypes.hpp"
 #include "ESPressio_IAtomicRecordStore.hpp"
+#include <ESPressio_PlatformOTA.hpp>
 
 namespace ESPressio::OTA {
 
@@ -64,17 +65,28 @@ struct ActiveTransactionRecord final {
     ReleaseIdentifier Release{};
     ManifestIdentifier Manifest{};
     SecurityGeneration CandidateSecurity{};
+    Platform::OTA::BootTargetIdentifier CandidateBootTarget{};
+    Platform::OTA::BootTargetIdentifier PreviousCommittedBootTarget{};
     RecoveryPoint Point{RecoveryPoint::None};
 
     constexpr bool IsValid() const noexcept {
-        return bool(Transaction) && bool(CandidateGeneration) && bool(PreviousCommittedGeneration) &&
-               bool(Release) && bool(Manifest) && Point != RecoveryPoint::None &&
-               Point != RecoveryPoint::Committed && Point != RecoveryPoint::RolledBack;
+        if (!Transaction || !CandidateGeneration || !PreviousCommittedGeneration ||
+  !Release || !Manifest || Point == RecoveryPoint::None ||
+  Point == RecoveryPoint::Committed || Point == RecoveryPoint::RolledBack) return false;
+        const bool activationArmed = Point >= RecoveryPoint::ActivationSelected;
+        if (activationArmed) {
+  if (!CandidateBootTarget || !PreviousCommittedBootTarget ||
+      CandidateBootTarget == PreviousCommittedBootTarget) return false;
+        } else if (CandidateBootTarget || PreviousCommittedBootTarget) {
+  return false;
+        }
+        return true;
     }
 
     constexpr bool IsEmpty() const noexcept {
         return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
-               CandidateSecurity.Value() == 0U && Point == RecoveryPoint::None;
+     CandidateSecurity.Value() == 0U && !CandidateBootTarget && !PreviousCommittedBootTarget &&
+     Point == RecoveryPoint::None;
     }
 };
 
@@ -112,7 +124,7 @@ struct OTAControlRecord final {
 };
 
 inline constexpr std::array<std::uint8_t, 4> OTAControlMagic{{'O', 'T', 'A', 'C'}};
-inline constexpr std::size_t OTAControlEncodedBytesV1 = 136U;
+inline constexpr std::size_t OTAControlEncodedBytesV1 = 144U;
 static_assert(OTAControlEncodedBytesV1 <= ConstrainedV1CapacityProfile::MaximumOTAControlRecordBytes,
               "OTA control record must fit the locked constrained durable-record capacity");
 
@@ -214,6 +226,8 @@ OTADurableStatus SerializeOTAControlRecord(
     DurableDetail::WriteLE(cursor, record.Active.Release.Value());
     for (const auto byte : record.Active.Manifest.Bytes()) *cursor++ = byte;
     DurableDetail::WriteLE(cursor, record.Active.CandidateSecurity.Value());
+    DurableDetail::WriteLE(cursor, record.Active.CandidateBootTarget.Value());
+    DurableDetail::WriteLE(cursor, record.Active.PreviousCommittedBootTarget.Value());
     *cursor++ = static_cast<std::uint8_t>(record.Active.Point);
     *cursor++ = 0U;
     DurableDetail::WriteLE(cursor, static_cast<std::uint16_t>(0U));
@@ -270,6 +284,8 @@ OTADurableStatus DeserializeOTAControlRecord(
     std::uint64_t activeRelease = 0U;
     std::array<std::uint8_t, 16> activeManifest{};
     std::uint64_t activeSecurity = 0U;
+    std::uint32_t candidateBootTarget = 0U;
+    std::uint32_t previousCommittedBootTarget = 0U;
 
     if (!DurableDetail::ReadLE(cursor, end, nextTransaction) ||
         !DurableDetail::ReadLE(cursor, end, nextGeneration) ||
@@ -285,7 +301,11 @@ OTADurableStatus DeserializeOTAControlRecord(
         !DurableDetail::ReadLE(cursor, end, activeRelease)) return OTADurableStatus::Corrupt;
     if (static_cast<std::size_t>(end - cursor) < activeManifest.size()) return OTADurableStatus::Corrupt;
     for (auto& byte : activeManifest) byte = *cursor++;
-    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) || cursor == end) return OTADurableStatus::Corrupt;
+    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) ||
+        !DurableDetail::ReadLE(cursor, end, candidateBootTarget) ||
+        !DurableDetail::ReadLE(cursor, end, previousCommittedBootTarget) || cursor == end) {
+        return OTADurableStatus::Corrupt;
+    }
     const auto recoveryRaw = *cursor++;
     if (recoveryRaw > static_cast<std::uint8_t>(RecoveryPoint::RolledBack)) return OTADurableStatus::Corrupt;
     if (cursor == end) return OTADurableStatus::Corrupt;
@@ -313,6 +333,8 @@ OTADurableStatus DeserializeOTAControlRecord(
     candidate.Active.Release = ReleaseIdentifier{activeRelease};
     candidate.Active.Manifest = ManifestIdentifier{activeManifest};
     candidate.Active.CandidateSecurity = SecurityGeneration{activeSecurity};
+    candidate.Active.CandidateBootTarget = Platform::OTA::BootTargetIdentifier{candidateBootTarget};
+    candidate.Active.PreviousCommittedBootTarget = Platform::OTA::BootTargetIdentifier{previousCommittedBootTarget};
     candidate.Active.Point = static_cast<RecoveryPoint>(recoveryRaw);
     candidate.Intent = static_cast<DurableIntent>(intentRaw);
 
@@ -468,21 +490,28 @@ public:
         return Commit(record);
     }
 
-    OTADurableStatus ArmActivation(UpdateTransactionId transaction) noexcept {
-        const auto ready = MutationReady();
-        if (ready != OTADurableStatus::Success) return ready;
-        OTAControlRecord<TCapacityProfile> record;
-        auto status = ReadCommitted(record);
-        if (status != OTADurableStatus::Success) return status;
-        if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-        if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
-            return OTADurableStatus::InvalidTransition;
-        }
-        record.Active.Point = RecoveryPoint::ActivationSelected;
-        record.Intent = DurableIntent::ActivationArmed;
-        return Commit(record);
+    OTADurableStatus ArmActivation(
+    UpdateTransactionId transaction,
+    Platform::OTA::BootTargetIdentifier candidateBootTarget,
+    Platform::OTA::BootTargetIdentifier previousCommittedBootTarget) noexcept {
+    if (!transaction || !candidateBootTarget || !previousCommittedBootTarget ||
+        candidateBootTarget == previousCommittedBootTarget) return OTADurableStatus::Invalid;
+    const auto ready = MutationReady();
+    if (ready != OTADurableStatus::Success) return ready;
+    OTAControlRecord<TCapacityProfile> record;
+    auto status = ReadCommitted(record);
+    if (status != OTADurableStatus::Success) return status;
+    if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
+    if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
+    if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
+        return OTADurableStatus::InvalidTransition;
     }
+    record.Active.CandidateBootTarget = candidateBootTarget;
+    record.Active.PreviousCommittedBootTarget = previousCommittedBootTarget;
+    record.Active.Point = RecoveryPoint::ActivationSelected;
+    record.Intent = DurableIntent::ActivationArmed;
+    return Commit(record);
+}
 
     OTADurableStatus MarkTrialEntered(UpdateTransactionId transaction) noexcept {
         const auto ready = MutationReady();
@@ -551,7 +580,9 @@ public:
         if (status != OTADurableStatus::Success) return status;
         if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
         if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-        if (record.Intent == DurableIntent::CommitIntent) return OTADurableStatus::InvalidTransition;
+        if (record.Intent == DurableIntent::CommitIntent ||
+            record.Active.Point < RecoveryPoint::ActivationSelected ||
+            record.Active.Point == RecoveryPoint::RollbackStarted) return OTADurableStatus::InvalidTransition;
         record.Active.Point = RecoveryPoint::RollbackStarted;
         record.Intent = DurableIntent::RollbackIntent;
         return Commit(record);
