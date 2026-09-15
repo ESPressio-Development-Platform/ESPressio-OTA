@@ -634,7 +634,7 @@ template<typename TCapacityProfile>
 class ArtifactCheckpointStore final {
     Persistence::IAtomicRecordStore& store_;
 
-    static bool TryKey(std::size_t slot, Persistence::AtomicRecordKey& output) noexcept {
+    static constexpr bool TryKey(std::size_t slot, Persistence::AtomicRecordKey& output) noexcept {
         if (slot >= TCapacityProfile::MaximumArtifactCheckpoints || slot > 0xFFFFU) return false;
         std::array<char, 14> raw{{'o','t','a','.','c','p','.','s','l','o','t','.',0,0}};
         raw[12] = static_cast<char>(slot & 0xFFU);
@@ -667,6 +667,12 @@ class ArtifactCheckpointStore final {
 
 public:
     explicit ArtifactCheckpointStore(Persistence::IAtomicRecordStore& store) noexcept : store_(store) {}
+
+    static constexpr bool TryRecordKey(
+        std::size_t slot,
+        Persistence::AtomicRecordKey& output) noexcept {
+        return TryKey(slot, output);
+    }
 
     OTADurableStatus Save(std::size_t slot, const ArtifactCheckpoint<TCapacityProfile>& checkpoint) noexcept {
         const auto ready = Ready();
