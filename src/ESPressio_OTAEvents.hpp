@@ -74,8 +74,8 @@ struct OTAEventTransactionContext final
 };
 
 #define ESPRESSIO_OTA_DECLARE_LIFECYCLE_EVENT(TName, TId, TCanonicalName) \
-    struct TName final : Event::TransmissibleEvent<TName> { \
-        static constexpr Event::EventTypeId TypeId{TId}; \
+    struct TName final : ESPressio::Event::TransmissibleEvent<TName> { \
+        static constexpr ESPressio::Event::EventTypeId TypeId{TId}; \
         static constexpr std::string_view CanonicalName{TCanonicalName}; \
         static constexpr std::size_t MaximumLiveInstances = 4U; \
         static constexpr std::size_t MaximumPendingInstances = 1U; \
@@ -108,8 +108,8 @@ ESPRESSIO_OTA_DECLARE_LIFECYCLE_EVENT(RecoveryRequiredEvent,
 #undef ESPRESSIO_OTA_DECLARE_LIFECYCLE_EVENT
 
 /** Terminal failure projection. Diagnostic payload is copied only after State owns it. */
-struct UpdateFailedEvent final : Event::TransmissibleEvent<UpdateFailedEvent> {
-    static constexpr Event::EventTypeId TypeId{0x45534F5441450009ULL};
+struct UpdateFailedEvent final : ESPressio::Event::TransmissibleEvent<UpdateFailedEvent> {
+    static constexpr ESPressio::Event::EventTypeId TypeId{0x45534F5441450009ULL};
     static constexpr std::string_view CanonicalName{"ESPressio.OTA.Event.UpdateFailed"};
     static constexpr std::size_t MaximumLiveInstances = 4U;
     static constexpr std::size_t MaximumPendingInstances = 1U;
@@ -130,8 +130,8 @@ struct UpdateFailedEvent final : Event::TransmissibleEvent<UpdateFailedEvent> {
         ESPRESSIO_PROPERTY_REQUIRED("outcome", Outcome))
 };
 
-struct RollbackFailedEvent final : Event::TransmissibleEvent<RollbackFailedEvent> {
-    static constexpr Event::EventTypeId TypeId{0x45534F544145000AULL};
+struct RollbackFailedEvent final : ESPressio::Event::TransmissibleEvent<RollbackFailedEvent> {
+    static constexpr ESPressio::Event::EventTypeId TypeId{0x45534F544145000AULL};
     static constexpr std::string_view CanonicalName{"ESPressio.OTA.Event.RollbackFailed"};
     static constexpr std::size_t MaximumLiveInstances = 4U;
     static constexpr std::size_t MaximumPendingInstances = 1U;
