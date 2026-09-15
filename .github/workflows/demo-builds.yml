@@ -16,8 +16,11 @@ jobs:
         with:
           python-version: '3.x'
 
+      # PlatformIO Core 6.2.0 currently conflicts with PIOArduino's ESP-IDF
+      # tool-scons package declaration and may delete/reinstall SCons mid-build,
+      # producing SCons.Tool.FortranCommon import failures unrelated to OTA.
       - name: Install PlatformIO
-        run: python -m pip install --upgrade platformio
+        run: python -m pip install "platformio==6.1.19"
 
       - name: Build ESP32 Arduino PlatformIO demo
         run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
