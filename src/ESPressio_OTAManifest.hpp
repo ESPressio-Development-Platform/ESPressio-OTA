@@ -7,6 +7,7 @@
 #include "ESPressio_OTACapacityProfile.hpp"
 #include "ESPressio_OTAProfile.hpp"
 #include "ESPressio_OTATypes.hpp"
+#include "ESPressio_OTAVersionSupport.hpp"
 #include "ESPressio_Verification.hpp"
 
 #include "ESPressio_BoundedContainers.hpp"
@@ -256,6 +257,12 @@ struct Manifest final
     std::uint16_t RequiredOTAProtocol{OTAProtocolV1.Value()};
     std::uint64_t RequiredOTAFeatures{0U};
 
+    // Signed candidate-runtime recovery capabilities. These are release-authoritative
+    // facts used before ActivationArmed; they are not inferred from package versions.
+    OTAVersionSupport CandidateManifestSchemaSupport{OTAV1OnlyVersionSupport};
+    OTAVersionSupport CandidateDurableSchemaSupport{OTAV1OnlyVersionSupport};
+    OTAVersionSupport CandidateOTAProtocolSupport{OTAV1OnlyVersionSupport};
+
     Serializable::BoundedVector<ManifestTargetClause<TCapacityProfile>, TCapacityProfile::MaximumTargetClauses>
         TargetClauses{};
     Serializable::BoundedVector<ManifestComponent<TCapacityProfile>, TCapacityProfile::MaximumComponents>
@@ -280,6 +287,9 @@ struct Manifest final
         ESPRESSIO_PROPERTY_REQUIRED("securityGeneration", SecurityGeneration),
         ESPRESSIO_PROPERTY_REQUIRED("requiredOTAProtocol", RequiredOTAProtocol),
         ESPRESSIO_PROPERTY_REQUIRED("requiredOTAFeatures", RequiredOTAFeatures),
+        ESPRESSIO_PROPERTY_REQUIRED("candidateManifestSchemaSupport", CandidateManifestSchemaSupport),
+        ESPRESSIO_PROPERTY_REQUIRED("candidateDurableSchemaSupport", CandidateDurableSchemaSupport),
+        ESPRESSIO_PROPERTY_REQUIRED("candidateOTAProtocolSupport", CandidateOTAProtocolSupport),
         ESPRESSIO_PROPERTY_REQUIRED("targetClauses", TargetClauses),
         ESPRESSIO_PROPERTY_REQUIRED("components", Components),
         ESPRESSIO_PROPERTY_REQUIRED("artifacts", Artifacts),
@@ -452,6 +462,10 @@ ManifestStatus ValidateManifest(const Manifest<TCapacityProfile>& manifest) noex
     using namespace ManifestDetail;
     if (manifest.DomainTag != ManifestDomainTag || manifest.SchemaVersion != ManifestSchemaV1.Value() ||
         !NonZero128(manifest.Identifier) || manifest.Release == 0U || manifest.RequiredOTAProtocol == 0U ||
+        !manifest.CandidateManifestSchemaSupport.IsValid() ||
+        !manifest.CandidateDurableSchemaSupport.IsValid() ||
+        !manifest.CandidateOTAProtocolSupport.IsValid() ||
+        !manifest.CandidateManifestSchemaSupport.CanRead(manifest.SchemaVersion) ||
         manifest.TargetClauses.empty() || manifest.Components.empty() || manifest.SignatureDescriptors.empty()) {
         return ManifestStatus::Invalid;
     }

@@ -196,6 +196,16 @@ int main() {
         firstBytes.data(), firstSize, restored);
     if (!decoded || ValidateManifest(restored) != ManifestStatus::Success) return 10;
     if (restored.SecurityGeneration != 0U || restored.ReleaseChannel != 0U) return 11;
+    if (!restored.CandidateManifestSchemaSupport.CanRead(ManifestSchemaV1.Value()) ||
+        !restored.CandidateDurableSchemaSupport.CanRead(OTADurableSchemaV1.Value()) ||
+        !restored.CandidateOTAProtocolSupport.CanRead(OTAProtocolV1.Value())) return 110;
+
+    TestManifest invalidRuntimeSupport = first;
+    invalidRuntimeSupport.CandidateManifestSchemaSupport = OTAVersionSupport{2U, 2U, 2U};
+    if (ValidateManifest(invalidRuntimeSupport) != ManifestStatus::Invalid) return 111;
+    invalidRuntimeSupport = first;
+    invalidRuntimeSupport.CandidateDurableSchemaSupport = OTAVersionSupport{2U, 1U, 2U};
+    if (ValidateManifest(invalidRuntimeSupport) != ManifestStatus::Invalid) return 112;
 
     TestManifest duplicate = first;
     if (!duplicate.Components.push_back(duplicate.Components[0])) return 12;

@@ -42,6 +42,8 @@ enum class CoordinatorCoreReason : std::uint32_t {
     InvalidConfiguration,
     InvalidStartRequest,
     InvalidActivationRequest,
+    CandidateCannotReadCurrentOTASchema,
+    CandidateManifestSchemaUnsupported,
     StateProjectionFailed
 };
 
@@ -1069,6 +1071,19 @@ public:
         if (record.Active.Transaction != request.Transaction) return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::TransactionMismatch);
         if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr ||
+            boundManifest_ != record.Active.Manifest) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);
+        }
+        if (!verifiedManifest_->CandidateDurableSchemaSupport.CanRead(record.SchemaVersion.Value())) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unsupported, CoordinatorCoreReason::CandidateCannotReadCurrentOTASchema);
+        }
+        if (!verifiedManifest_->CandidateManifestSchemaSupport.CanRead(verifiedManifest_->SchemaVersion)) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Unsupported, CoordinatorCoreReason::CandidateManifestSchemaUnsupported);
         }
         const auto previous = boot_.CommittedBootTarget();
         if (!previous || boot_.CurrentBootTarget() != previous || request.CandidateBootTarget == previous) return RecoveryRequired(&record);
