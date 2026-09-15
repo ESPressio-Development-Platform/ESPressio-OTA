@@ -122,6 +122,8 @@ No hidden OTA task is required. Each call performs bounded work and may return `
 
 Only the Coordinator requests system restart. A ComponentHandler can report that restart is required, but does not reboot the system itself.
 
+Artifact-source retry/failover is also Coordinator-owned. A caller may opt into `IArtifactSourceSelector` with a finite maximum-attempt count. The selector receives semantic facts about the current transaction, Artifact, attempt number, previous source failure and accepted checkpoint prefix; it does not receive or derive provider-list position as priority. Without an explicit selector, the original single-source behavior remains the default.
+
 ## Durable recovery and power loss
 
 OTA uses `Persistence::IAtomicRecordStore` rather than owning a private storage backend.
@@ -147,7 +149,11 @@ THEN mutate or expose corresponding runtime/platform truth
 
 The V1 committed-baseline promotion, security-floor advancement and active-transaction clearing occur in one atomic control-record replacement. Therefore a crash at that boundary reconstructs either the complete old CommitIntent state or the complete new committed state; OTA never exposes an intermediate baseline/floor combination.
 
-Artifact checkpoints are separately bounded and atomic. When safe resumability cannot be proven, V1 may restart acquisition from offset zero rather than inventing unsafe partial-resume semantics.
+Artifact checkpoints are separately bounded and atomic. V1 resume is contiguous-prefix-only: an incomplete retained prefix remains private acquisition state and is never exposed as a committed Artifact. For a resume-capable private store, retained bytes are first stabilized, then the atomic checkpoint is advanced; the checkpoint may lag physically retained bytes but may never lead them. Recovery reopens the partial object at the accepted checkpoint boundary, discarding/ignoring any uncheckpointed suffix, and replays the retained prefix from byte zero before opening the selected Source at the exact next logical offset.
+
+The checkpoint is bound to transaction freshness, Artifact identity, trusted expected length and accepted prefix, not to the original Source provider. Cross-provider resume is therefore allowed only when the currently selected Source explicitly supports the required offset and the private Store can replay a matching retained prefix. If those runtime facts cannot prove safe resume, OTA deterministically restarts acquisition from offset zero. Source failover by itself is never treated as evidence of resumability.
+
+A resumed acquisition does not weaken verification: after the complete Artifact is finalized into the committed Artifact namespace, the normal verification phase rereads the entire object from byte zero and performs the authoritative exact-length/digest check before `RecoveryPoint::ArtifactsVerified` can be established. Opaque cryptographic verifier state is not persisted as trusted checkpoint evidence in the V1 baseline.
 
 ## Trial, commit and rollback
 
@@ -296,7 +302,8 @@ using Capacity = ESPressio::OTA::ConstrainedV1CapacityProfile;
 // 4. Register ComponentHandlers, policies and health conditions.
 // 5. Provide Artifact source/store and Security digest verification.
 // 6. Construct Coordinator<Capacity, ...>.
-// 7. Initialize(), Start(), bind the verified Manifest/target profile,
+// 7. Optionally configure finite Artifact source retry/failover selection.
+// 8. Initialize(), Start(), bind the verified Manifest/target profile,
 //    then call Advance() cooperatively until the current operation settles.
 ```
 
@@ -320,7 +327,18 @@ This allows OTA to compose with future transport/distribution systems without ma
 
 The native suite covers bounded schemas, canonical Manifest encoding, providers/catalogs, deterministic UpdatePlan construction, Component lifecycle execution, durable control/recovery, State, policy/health, acquisition/verification, Coordinator activation/commit/rollback, staging recovery, cross-version candidate admission, optional bridges, memory accounting, durable fault injection and platform-boundary recovery.
 
-The ESP32 implementation line is separately built against a real Arduino/ESP32 PlatformIO toolchain using the ESP-IDF-backed OTA providers.
+Artifact-flow coverage includes short/truncated and overrun streams, cooperative Pending behavior, source-attempt failure, private-prefix resume, checkpoint lag behind retained bytes, cross-provider resume, forced restart-from-zero for a non-offset replacement Source, digest failure and committed-store collision behavior. Coordinator-specific source-selection tests separately exercise successful explicit failover and finite retry exhaustion.
+
+The ESP32 implementation line is separately built against real ESP32 toolchains. The P10 demo workflow currently validates four compile gates:
+
+```text
+ESP32 Arduino PlatformIO provider-readiness demo
+pure ESP-IDF PlatformIO provider-readiness demo
+exact ESP32 Arduino IDE sketch source
+exact ESP-IDF-provider Arduino IDE sketch source
+```
+
+The pure ESP-IDF readiness demo deliberately includes only the OTA capacity contract and the portable/concrete Platform OTA provider surface it exercises. It does not pull the full Coordinator/State/Timing dependency graph merely to test Platform provider readiness, and it does not use an Arduino compatibility shim.
 
 Physical-device validation remains a distinct release-readiness activity: a successful host or cross-compile is not represented as proof that power-cut/reboot behaviour has been exercised on physical hardware.
 
@@ -343,6 +361,8 @@ Tests are enabled by default and can be disabled for a consuming super-project w
 ## Demos
 
 P10 demos live under `demos/` and follow the ESPressio demo policy: each logical Arduino-capable demo provides matching `arduino_ide/` and `platformio/` variants. Device examples demonstrate concrete provider composition without silently turning demo startup into a flash/boot mutation.
+
+The ESP-IDF provider-readiness PlatformIO variant is intentionally a focused pure-ESP-IDF composition. Its matching sketch-source validation remains an Arduino-capable source check against the corresponding provider demo source; neither validation path performs flash, boot-selection, trial-state or restart mutation at startup.
 
 ## License
 
