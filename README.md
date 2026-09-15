@@ -255,7 +255,7 @@ The conservative constrained V1 profile used for WROOM-class validation includes
 Current native host-ABI retained-object accounting for that profile reports:
 
 ```text
-Coordinator:                  2488 bytes
+Coordinator:                  2656 bytes
 State runtime:                1112 bytes
 State owner bindings:          144 bytes
 Signed Manifest object:       8384 bytes
@@ -263,7 +263,7 @@ Manifest wire workspace:      8192 bytes
 Artifact transfer workspace:  4096 bytes
 Frozen target profile:         256 bytes
 ----------------------------------------
-Retained core envelope:      24672 bytes
+Retained core envelope:      24840 bytes
 Dedicated OTA task stack:        0 bytes
 ```
 
