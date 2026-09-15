@@ -33,9 +33,40 @@ using Capacity = ConstrainedV1CapacityProfile;
 
 class CoordinatorTestHandler final : public ComponentHandler<CoordinatorTestComponent, Capacity> {
 public:
+    ComponentRecoveryState Recovery{ComponentRecoveryState::NotPrepared};
+    std::size_t PrepareCalls{0U};
+    std::size_t StageCalls{0U};
+    std::size_t FinalizeCalls{0U};
+
+    ComponentActionResult Prepare(const ComponentPreflightContext<Capacity>& context) noexcept override {
+        ++PrepareCalls;
+        if (!context.IsValid()) {
+            return ComponentActionResult::Failed({OutcomeClass::Invalid, {DiagnosticDomain::Component, 1U}});
+        }
+        Recovery = ComponentRecoveryState::PartiallyStaged;
+        return ComponentActionResult::Complete();
+    }
+
+    ComponentActionResult Stage(const ComponentExecutionContext<Capacity>& context) noexcept override {
+        ++StageCalls;
+        if (!context.IsValid()) {
+            return ComponentActionResult::Failed({OutcomeClass::Invalid, {DiagnosticDomain::Component, 2U}});
+        }
+        return ComponentActionResult::Complete();
+    }
+
+    ComponentActionResult FinalizeStage(const ComponentExecutionContext<Capacity>& context) noexcept override {
+        ++FinalizeCalls;
+        if (!context.IsValid()) {
+            return ComponentActionResult::Failed({OutcomeClass::Invalid, {DiagnosticDomain::Component, 3U}});
+        }
+        Recovery = ComponentRecoveryState::Staged;
+        return ComponentActionResult::Complete();
+    }
+
     ComponentRecoveryInspection InspectRecoveryState(
         const ComponentPreflightContext<Capacity>&) noexcept override {
-        return {ComponentRecoveryState::NotPrepared, Result::Success()};
+        return {Recovery, Result::Success()};
     }
 };
 
@@ -59,6 +90,26 @@ constexpr std::array<std::uint8_t, 16> Id(std::uint8_t value) noexcept {
     std::array<std::uint8_t, 16> result{};
     result[15] = value;
     return result;
+}
+
+bool ConfigureTargetProfile(UpdateTargetProfile<Capacity>& profile) {
+    if (profile.SetSystemIdentity(
+            System::ProductTypeIdentifier{1U},
+            System::HardwareFamilyIdentifier{2U},
+            System::HardwareRevision{1U},
+            System::ArchitectureIdentifier{3U},
+            System::SoftwareVariantIdentifier{4U}) != TargetProfileStatus::Success) return false;
+    if (profile.SetStorageLayout(
+            Platform::OTA::StorageLayoutIdentifier{5U},
+            Platform::OTA::StorageLayoutGeneration{1U}) != TargetProfileStatus::Success) return false;
+    if (profile.SetPersistenceSchema(
+            Persistence::SchemaIdentifier{6U},
+            Persistence::SchemaGeneration{1U}) != TargetProfileStatus::Success) return false;
+    if (profile.SetOTASupport(OTAProtocolV1, 0U) != TargetProfileStatus::Success) return false;
+    if (profile.AddSupportedComponentType(ComponentTypeId{0x4553504F54414301ULL}) != TargetProfileStatus::Success) return false;
+    std::array<std::uint8_t, 32> fingerprint{};
+    fingerprint[0] = 1U;
+    return profile.SetFingerprintAndFreeze(UpdateTargetProfileFingerprint{fingerprint}) == TargetProfileStatus::Success;
 }
 
 class FakeAtomicRecordStore final : public Persistence::IAtomicRecordStore {
@@ -435,6 +486,7 @@ struct Fixture final {
     HealthCheckSet<ApplicationReadyHealthCondition, 1U> ApplicationReadyChecks{};
     PassingApplicationReady ApplicationReady{};
     HealthConditionEvaluator<ApplicationReadyHealthCondition, 1U> ApplicationReadyEvaluator{ApplicationReadyChecks};
+    UpdateTargetProfile<Capacity> TargetProfile{};
 
     bool InitializeState() {
         if (RegisterOTAStateTypes(Directory) != Primitive::TypeDirectoryRegistrationStatus::Success) return false;
@@ -447,6 +499,7 @@ struct Fixture final {
         Handlers.Freeze();
         if (ApplicationReadyChecks.Add(ApplicationReady) != HealthCheckRegistrationStatus::Success) return false;
         if (Health.Add(ApplicationReadyEvaluator) != HealthRegistryStatus::Success) return false;
+        if (!ConfigureTargetProfile(TargetProfile)) return false;
         return true;
     }
 
@@ -456,11 +509,22 @@ struct Fixture final {
     }
 };
 
-[[maybe_unused]] bool AdvanceToStaged(OTAControlStore<Capacity>& control, UpdateTransactionId transaction) {
-    return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&
-           control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsVerified) == OTADurableStatus::Success &&
-           control.AdvanceRecoveryPoint(transaction, RecoveryPoint::StagingStarted) == OTADurableStatus::Success &&
-           control.AdvanceRecoveryPoint(transaction, RecoveryPoint::Staged) == OTADurableStatus::Success;
+[[maybe_unused]] bool DriveToStaged(TestCoordinator& coordinator,
+                                    OTAControlStore<Capacity>& control,
+                                    UpdateTransactionId transaction,
+                                    std::size_t maximumSteps = 32U) {
+    for (std::size_t step = 0U; step < maximumSteps; ++step) {
+        const auto result = coordinator.Advance();
+        if (result.Outcome != OutcomeClass::Pending && result.Outcome != OutcomeClass::Deferred &&
+            result.Outcome != OutcomeClass::Success) return false;
+        OTAControlRecord<Capacity> record;
+        if (control.Load(record) != OTADurableStatus::Success || !record.HasActiveTransaction ||
+            record.Active.Transaction != transaction) return false;
+        if (record.Active.Point == RecoveryPoint::Staged) {
+            return coordinator.Status().Lifecycle == UpdateLifecycle::Staged;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -516,14 +580,15 @@ int main() {
         if (ValidateManifest(manifest) != ManifestStatus::Success) return 23;
         UpdateTransactionId transaction;
         if (!coordinator.Start({ReleaseIdentifier{20U}, ManifestIdentifier{Id(20U)}, SecurityGeneration{2U}}, transaction)) return 24;
-        if (!coordinator.BindVerifiedManifest(manifest)) return 25;
+        if (!coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 25;
         OTAControlRecord<Capacity> acceptedManifest;
         if (fixture.Control.Load(acceptedManifest) != OTADurableStatus::Success ||
             acceptedManifest.Active.Point != RecoveryPoint::ManifestAccepted ||
             !coordinator.Status().UpdatePlanReady ||
             coordinator.Status().Lifecycle != UpdateLifecycle::CandidateSelected) return 250;
-        if (!AdvanceToStaged(fixture.Control, transaction)) return 26;
-        if (coordinator.Advance().Outcome != OutcomeClass::Pending || coordinator.Status().Lifecycle != UpdateLifecycle::Staged) return 27;
+        if (!DriveToStaged(coordinator, fixture.Control, transaction)) return 26;
+        if (fixture.ComponentHandler.PrepareCalls != 1U || fixture.ComponentHandler.StageCalls != 1U ||
+            fixture.ComponentHandler.FinalizeCalls != 1U) return 27;
 
         fixture.ActivatePolicy.Verdict = PolicyVerdict::Defer;
         CoordinatorActivationRequest activation{transaction, Platform::OTA::BootTargetIdentifier{2U}, true, true, true};
@@ -573,9 +638,8 @@ int main() {
         const auto manifest = CandidateManifest(30U, 30U, 1U, false);
         UpdateTransactionId transaction;
         if (!coordinator.Start({ReleaseIdentifier{30U}, ManifestIdentifier{Id(30U)}, SecurityGeneration{1U}}, transaction)) return 53;
-        if (!coordinator.BindVerifiedManifest(manifest)) return 54;
-        if (!AdvanceToStaged(fixture.Control, transaction)) return 55;
-        if (coordinator.Advance().Outcome != OutcomeClass::Pending) return 56;
+        if (!coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 54;
+        if (!DriveToStaged(coordinator, fixture.Control, transaction)) return 55;
         if (coordinator.BeginActivation({transaction, Platform::OTA::BootTargetIdentifier{2U}, true, true, true}).Outcome != OutcomeClass::Pending) return 57;
         if (coordinator.Advance().Outcome != OutcomeClass::Pending) return 58;
         fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{2U};
@@ -618,7 +682,7 @@ int main() {
         if (ValidateManifest(manifest) != ManifestStatus::Success) return 73;
         UpdateTransactionId transaction;
         if (!coordinator.Start({ReleaseIdentifier{40U}, ManifestIdentifier{Id(40U)}, SecurityGeneration{1U}}, transaction)) return 74;
-        if (!coordinator.BindVerifiedManifest(manifest)) return 75;
+        if (!coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 75;
 
         if (coordinator.Advance().Outcome != OutcomeClass::Pending ||
             coordinator.Status().Lifecycle != UpdateLifecycle::Acquiring) return 76;
@@ -662,11 +726,10 @@ int main() {
             fixture.Digest.BeginCalls != 1U || fixture.Digest.UpdateCalls == 0U ||
             fixture.Digest.FinalCalls != 1U || fixture.Digest.Bytes != fixture.Source.Size) return 86;
 
-        const auto frontier = coordinator.Advance();
-        if (frontier.Outcome != OutcomeClass::Pending ||
-            frontier.Detail.Reason != static_cast<std::uint32_t>(CoordinatorCoreReason::AwaitingExecutionIntegration) ||
-            coordinator.Status().Lifecycle != UpdateLifecycle::Preparing) return 87;
-        if (!coordinator.Cancel(transaction) || coordinator.Status().Availability != CoordinatorAvailability::Ready) return 88;
+        if (!DriveToStaged(coordinator, fixture.Control, transaction)) return 87;
+        if (fixture.ComponentHandler.PrepareCalls != 1U || fixture.ComponentHandler.StageCalls != 1U ||
+            fixture.ComponentHandler.FinalizeCalls != 1U) return 88;
+        if (!coordinator.Cancel(transaction) || coordinator.Status().Availability != CoordinatorAvailability::Ready) return 89;
     }
 
 #else
