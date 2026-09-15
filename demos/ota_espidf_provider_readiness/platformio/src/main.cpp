@@ -1,7 +1,7 @@
 #include <cstdio>
 #include <cstdint>
 
-#include <ESPressio_OTA.hpp>
+#include <ESPressio_OTACapacityProfile.hpp>
 #include <ESPressio_Platform_IDFOTA.hpp>
 
 namespace {
@@ -16,6 +16,12 @@ using ESPressio::Platform::OTA::Status;
  * image write, change the selected boot partition, mark a trial image, or
  * restart the device. Those mutating operations remain Coordinator-owned in a
  * complete OTA application.
+ *
+ * This provider-readiness demo intentionally consumes only the OTA capacity
+ * contract plus the portable/concrete Platform OTA contracts that it actually
+ * exercises. Pulling ESPressio_OTA.hpp here would unnecessarily compose the
+ * complete Coordinator/State/Timing graph and would no longer be a focused
+ * pure-ESP-IDF provider integration gate.
  */
 class OTAIDFReadinessDemo final {
     ESPressio::Platform::IDF::OTAApplicationImageStaging staging_{};
