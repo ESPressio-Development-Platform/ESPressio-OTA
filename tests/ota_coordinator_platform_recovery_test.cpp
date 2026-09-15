@@ -9,6 +9,10 @@
 using namespace ESPressio;
 using namespace ESPressio::OTA;
 
+#ifndef ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO
+#define ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO 1
+#endif
+
 struct PlatformRecoveryComponent {};
 
 namespace ESPressio::OTA {
@@ -364,6 +368,7 @@ bool LoadActive(Fixture& fixture, OTAControlRecord<Capacity>& record) {
 int main() {
     if (!InstallIdentity()) return 1;
 
+#if ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 1
     // Activation: BootControl selection failure occurs after ActivationArmed was
     // durably recorded. A fresh Coordinator re-inspects the already-Activated
     // component and can safely retry selection without replaying Activate().
@@ -415,8 +420,6 @@ int main() {
             if (recovered.Advance().Outcome != OutcomeClass::Pending || fixture.Handler.ActivateCalls != 1U) return 15;
         }
 
-        // Simulate the reboot into the candidate. Reconstruction validates actual
-        // boot/trial facts, then persists TrialBootEntered without replaying Activate.
         fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{2U};
         fixture.Trial.Trial = true;
         {
@@ -428,7 +431,7 @@ int main() {
         if (!LoadActive(fixture, record) || record.Active.Point != RecoveryPoint::TrialBootEntered ||
             record.Intent != DurableIntent::None) return 18;
     }
-
+#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2
     // Commit: power loss/failure after durable CommitIntent cannot promote the
     // baseline accidentally. Mark-valid failure leaves CommitIntent intact. A
     // reboot after the bootloader was already marked valid is represented by
@@ -460,8 +463,6 @@ int main() {
         if (!LoadActive(fixture, record) || record.Intent != DurableIntent::CommitIntent ||
             record.Committed.Generation != UpdateGenerationId{1U} || record.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 25;
 
-        // Model a crash after bootloader validity became durable but before OTA
-        // could promote its own committed baseline: Trial=false, CommitIntent intact.
         fixture.Trial.MarkValidStatus = Platform::OTA::Status::Success;
         fixture.Trial.Trial = false;
         {
@@ -474,7 +475,7 @@ int main() {
             record.Committed.Generation != active.CandidateGeneration ||
             record.MinimumAcceptedSecurity != SecurityGeneration{1U}) return 29;
     }
-
+#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 3
     // Rollback: each platform failure leaves RollbackIntent durable. Recovery can
     // skip an already-RolledBack component, retry known-good target selection,
     // retry trial invalidation and retry restart without altering the old baseline.
@@ -556,6 +557,9 @@ int main() {
             record.Committed.Generation != UpdateGenerationId{1U} ||
             record.MinimumAcceptedSecurity != SecurityGeneration{0U}) return 50;
     }
+#else
+#error "Unknown ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO"
+#endif
 
     return 0;
 }
