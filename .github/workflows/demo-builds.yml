@@ -21,8 +21,10 @@ jobs:
           from pathlib import Path
           p = Path('src/ESPressio_OTACoordinator.hpp')
           s = p.read_text()
-          s = s.replace('    ArtifactSourceRetryExhausted\n};', '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1) if 'CandidateTrialRejected' not in s else s
-          s = s.replace('    bool rollbackRestartIssued_{false};\n', '    bool rollbackRestartIssued_{false};\n    bool activationRecovered_{false};\n', 1) if 'bool activationRecovered_' not in s else s
+          if 'CandidateTrialRejected' not in s:
+              s = s.replace('    ArtifactSourceRetryExhausted\n};', '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1)
+          if 'bool activationRecovered_' not in s:
+              s = s.replace('    bool rollbackRestartIssued_{false};\n', '    bool rollbackRestartIssued_{false};\n    bool activationRecovered_{false};\n', 1)
           if '        activationRecovered_ = false;\n        verifiedManifestBound_ = false;' not in s:
               s = s.replace('        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;', '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
           if 'activationRecovered_ = true;' not in s:
@@ -37,75 +39,60 @@ jobs:
               s = s.replace(old, new, 1)
           if 'const auto inspected = trial_.InspectBootTargetTrialState' not in s:
               old = '        if (record.Intent == DurableIntent::ActivationArmed) {\n            const auto componentStep = AdvanceComponentLifecycle(\n                record, ComponentLifecycleOperation::Activate);'
-              new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
-            if (activationRecovered_) {
-                if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {
-                    return RecoveryRequired(&record);
-                } else {
-                    const auto inspected = trial_.InspectBootTargetTrialState(
-                        record.Active.CandidateBootTarget);
-                    if (!inspected) return RecoveryRequired(&record);
-                    switch (inspected.State) {
-                        case Platform::OTA::TrialBootState::NeverAttempted:
-                        case Platform::OTA::TrialBootState::Armed:
-                            activationRecovered_ = false;
-                            break;
-                        case Platform::OTA::TrialBootState::Rejected:
-                            activationRecovered_ = false;
-                            return StartRollback(record, CoordinatorDetail::CoreResult(
-                                OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));
-                        case Platform::OTA::TrialBootState::Unknown:
-                        case Platform::OTA::TrialBootState::Untracked:
-                        case Platform::OTA::TrialBootState::PendingValidation:
-                        case Platform::OTA::TrialBootState::Accepted:
-                            return RecoveryRequired(&record);
-                    }
-                }
-            }
-
-            const auto componentStep = AdvanceComponentLifecycle(
-                record, ComponentLifecycleOperation::Activate);'''
+              lines = [
+                  '        if (record.Intent == DurableIntent::ActivationArmed) {',
+                  '            if (activationRecovered_) {',
+                  '                if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {',
+                  '                    return RecoveryRequired(&record);',
+                  '                } else {',
+                  '                    const auto inspected = trial_.InspectBootTargetTrialState(',
+                  '                        record.Active.CandidateBootTarget);',
+                  '                    if (!inspected) return RecoveryRequired(&record);',
+                  '                    switch (inspected.State) {',
+                  '                        case Platform::OTA::TrialBootState::NeverAttempted:',
+                  '                        case Platform::OTA::TrialBootState::Armed:',
+                  '                            activationRecovered_ = false;',
+                  '                            break;',
+                  '                        case Platform::OTA::TrialBootState::Rejected:',
+                  '                            activationRecovered_ = false;',
+                  '                            return StartRollback(record, CoordinatorDetail::CoreResult(',
+                  '                                OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));',
+                  '                        case Platform::OTA::TrialBootState::Unknown:',
+                  '                        case Platform::OTA::TrialBootState::Untracked:',
+                  '                        case Platform::OTA::TrialBootState::PendingValidation:',
+                  '                        case Platform::OTA::TrialBootState::Accepted:',
+                  '                            return RecoveryRequired(&record);',
+                  '                    }',
+                  '                }',
+                  '            }',
+                  '',
+                  '            const auto componentStep = AdvanceComponentLifecycle(',
+                  '                record, ComponentLifecycleOperation::Activate);'
+              ]
               if old not in s: raise SystemExit('ActivationArmed advance block not found')
-              s = s.replace(old, new, 1)
+              s = s.replace(old, '\n'.join(lines), 1)
           if 'if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget)' not in s:
               old = '            if (current == record.Active.PreviousCommittedBootTarget) {\n                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
-              new = '''            if (current == record.Active.PreviousCommittedBootTarget) {
-                if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-                    const auto selected = CoordinatorDetail::PlatformResult(
-                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-                    if (selected.Outcome != OutcomeClass::Success) return selected;
-                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
-                    return {OutcomeClass::Pending, {}};
-                }
-                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
+              lines = [
+                  '            if (current == record.Active.PreviousCommittedBootTarget) {',
+                  '                if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {',
+                  '                    const auto selected = CoordinatorDetail::PlatformResult(',
+                  '                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));',
+                  '                    if (selected.Outcome != OutcomeClass::Success) return selected;',
+                  '                    if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();',
+                  '                    return {OutcomeClass::Pending, {}};',
+                  '                }',
+                  '                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
+              ]
               if old not in s: raise SystemExit('Rollback normalization block not found')
-              s = s.replace(old, new, 1)
-          p.write_text(s)
-
-          p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
-          s = p.read_text()
-          if 'Platform::OTA::TrialBootState CandidateState' not in s:
-              s = s.replace('    bool Trial{false};\n', '    bool Trial{false};\n    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};\n    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};\n    mutable std::size_t InspectCalls{0U};\n', 1)
-          if 'InspectBootTargetTrialState' not in s:
-              anchor = '    Platform::OTA::Result MarkCurrentBootValid() noexcept {'
-              method = '''    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
-        Platform::OTA::BootTargetIdentifier target) const noexcept {
-        ++InspectCalls;
-        if (!target) return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
-        return {InspectStatus,
-                InspectStatus == Platform::OTA::Status::Success ? CandidateState : Platform::OTA::TrialBootState::Unknown,
-                InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
-    }
-'''
-              if anchor not in s: raise SystemExit('FaultTrialBoot anchor not found')
-              s = s.replace(anchor, method + anchor, 1)
+              s = s.replace(old, '\n'.join(lines), 1)
           p.write_text(s)
           PY
       - name: Commit source fix
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/ESPressio_OTACoordinator.hpp tests/ota_coordinator_platform_recovery_test.cpp
+          git add src/ESPressio_OTACoordinator.hpp
           git diff --cached --quiet && exit 0
           git commit -m "fix: reconcile rejected OTA trial candidates"
           git push origin HEAD:ota_v1
