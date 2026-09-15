@@ -90,19 +90,4 @@ jobs:
       - name: OTA retained-memory accounting report
         run: ./build/tests/espressio_ota_memory_accounting_test
       - name: Test
-        shell: bash
-        run: |
-          set +e
-          ctest --test-dir build --output-on-failure
-          status=$?
-          if [ "$status" -ne 0 ]; then
-            for test in \
-              espressio_ota_acquisition_test \
-              espressio_ota_acquisition_resume_test \
-              espressio_ota_coordinator_acquisition_test; do
-              "./build/tests/${test}"
-              rc=$?
-              echo "${test} rc=${rc}"
-            done
-          fi
-          exit "$status"
+        run: ctest --test-dir build --output-on-failure
