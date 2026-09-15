@@ -1335,16 +1335,16 @@ public:
                                        UpdateOperation::Rollback, success) ? success : ProjectionFailure();
             }
             if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
+            if (trial_.IsCurrentBootTrial()) {
+                const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
+                if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
+                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
+                return {OutcomeClass::Pending, {}};
+            }
             if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
                 const auto mapped = CoordinatorDetail::PlatformResult(
                     boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
                 if (mapped.Outcome != OutcomeClass::Success) return mapped;
-                if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
-                return {OutcomeClass::Pending, {}};
-            }
-            if (trial_.IsCurrentBootTrial()) {
-                const auto mapped = CoordinatorDetail::PlatformResult(trial_.MarkCurrentBootInvalid());
-                if (mapped.Outcome != OutcomeClass::Success && mapped.Outcome != OutcomeClass::Pending) return mapped;
                 if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
             }
