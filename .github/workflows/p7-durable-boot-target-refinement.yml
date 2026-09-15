@@ -23,199 +23,92 @@ jobs:
           durable = Path('src/ESPressio_OTADurable.hpp')
           text = durable.read_text()
 
-          def replace_once(old, new):
+          def once(old, new):
               global text
-              if text.count(old) != 1:
-                  raise RuntimeError(f'expected exactly one durable match, got {text.count(old)} for {old[:80]!r}')
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'durable replacement count={count}: {old!r}')
               text = text.replace(old, new, 1)
 
-          replace_once(
-              '#include "ESPressio_IAtomicRecordStore.hpp"\n',
-              '#include "ESPressio_IAtomicRecordStore.hpp"\n#include <ESPressio_PlatformOTA.hpp>\n')
+          once('#include "ESPressio_IAtomicRecordStore.hpp"\n',
+               '#include "ESPressio_IAtomicRecordStore.hpp"\n#include <ESPressio_PlatformOTA.hpp>\n')
 
-          replace_once(
-              '''struct ActiveTransactionRecord final {
-              UpdateTransactionId Transaction{};
-              UpdateGenerationId CandidateGeneration{};
-              UpdateGenerationId PreviousCommittedGeneration{};
-              ReleaseIdentifier Release{};
-              ManifestIdentifier Manifest{};
-              SecurityGeneration CandidateSecurity{};
-              RecoveryPoint Point{RecoveryPoint::None};
+          once('    SecurityGeneration CandidateSecurity{};\n    RecoveryPoint Point{RecoveryPoint::None};',
+               '    SecurityGeneration CandidateSecurity{};\n    Platform::OTA::BootTargetIdentifier CandidateBootTarget{};\n    Platform::OTA::BootTargetIdentifier PreviousCommittedBootTarget{};\n    RecoveryPoint Point{RecoveryPoint::None};')
 
-              constexpr bool IsValid() const noexcept {
-                  return bool(Transaction) && bool(CandidateGeneration) && bool(PreviousCommittedGeneration) &&
-                         bool(Release) && bool(Manifest) && Point != RecoveryPoint::None &&
-                         Point != RecoveryPoint::Committed && Point != RecoveryPoint::RolledBack;
+          once('''    constexpr bool IsValid() const noexcept {
+              return bool(Transaction) && bool(CandidateGeneration) && bool(PreviousCommittedGeneration) &&
+                     bool(Release) && bool(Manifest) && Point != RecoveryPoint::None &&
+                     Point != RecoveryPoint::Committed && Point != RecoveryPoint::RolledBack;
+          }'''.replace('          ', ''),
+               '''    constexpr bool IsValid() const noexcept {
+              if (!Transaction || !CandidateGeneration || !PreviousCommittedGeneration ||
+                  !Release || !Manifest || Point == RecoveryPoint::None ||
+                  Point == RecoveryPoint::Committed || Point == RecoveryPoint::RolledBack) return false;
+              const bool activationArmed = Point >= RecoveryPoint::ActivationSelected;
+              if (activationArmed) {
+                  if (!CandidateBootTarget || !PreviousCommittedBootTarget ||
+                      CandidateBootTarget == PreviousCommittedBootTarget) return false;
+              } else if (CandidateBootTarget || PreviousCommittedBootTarget) {
+                  return false;
               }
+              return true;
+          }'''.replace('          ', ''))
 
-              constexpr bool IsEmpty() const noexcept {
-                  return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
-                         CandidateSecurity.Value() == 0U && Point == RecoveryPoint::None;
-              }
-          };''',
-              '''struct ActiveTransactionRecord final {
-              UpdateTransactionId Transaction{};
-              UpdateGenerationId CandidateGeneration{};
-              UpdateGenerationId PreviousCommittedGeneration{};
-              ReleaseIdentifier Release{};
-              ManifestIdentifier Manifest{};
-              SecurityGeneration CandidateSecurity{};
-              Platform::OTA::BootTargetIdentifier CandidateBootTarget{};
-              Platform::OTA::BootTargetIdentifier PreviousCommittedBootTarget{};
-              RecoveryPoint Point{RecoveryPoint::None};
+          once('''    constexpr bool IsEmpty() const noexcept {
+              return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
+                     CandidateSecurity.Value() == 0U && Point == RecoveryPoint::None;
+          }'''.replace('          ', ''),
+               '''    constexpr bool IsEmpty() const noexcept {
+              return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
+                     CandidateSecurity.Value() == 0U && !CandidateBootTarget && !PreviousCommittedBootTarget &&
+                     Point == RecoveryPoint::None;
+          }'''.replace('          ', ''))
 
-              constexpr bool IsValid() const noexcept {
-                  if (!Transaction || !CandidateGeneration || !PreviousCommittedGeneration ||
-                      !Release || !Manifest || Point == RecoveryPoint::None ||
-                      Point == RecoveryPoint::Committed || Point == RecoveryPoint::RolledBack) return false;
-                  const bool activationArmed = Point >= RecoveryPoint::ActivationSelected;
-                  if (activationArmed) {
-                      if (!CandidateBootTarget || !PreviousCommittedBootTarget ||
-                          CandidateBootTarget == PreviousCommittedBootTarget) return false;
-                  } else if (CandidateBootTarget || PreviousCommittedBootTarget) {
-                      return false;
-                  }
-                  return true;
-              }
+          once('inline constexpr std::size_t OTAControlEncodedBytesV1 = 136U;',
+               'inline constexpr std::size_t OTAControlEncodedBytesV1 = 144U;')
 
-              constexpr bool IsEmpty() const noexcept {
-                  return !Transaction && !CandidateGeneration && !PreviousCommittedGeneration && !Release && !Manifest &&
-                         CandidateSecurity.Value() == 0U && !CandidateBootTarget && !PreviousCommittedBootTarget &&
-                         Point == RecoveryPoint::None;
-              }
-          };''')
+          once('    DurableDetail::WriteLE(cursor, record.Active.CandidateSecurity.Value());\n    *cursor++ = static_cast<std::uint8_t>(record.Active.Point);',
+               '    DurableDetail::WriteLE(cursor, record.Active.CandidateSecurity.Value());\n    DurableDetail::WriteLE(cursor, record.Active.CandidateBootTarget.Value());\n    DurableDetail::WriteLE(cursor, record.Active.PreviousCommittedBootTarget.Value());\n    *cursor++ = static_cast<std::uint8_t>(record.Active.Point);')
 
-          replace_once('inline constexpr std::size_t OTAControlEncodedBytesV1 = 136U;',
-                       'inline constexpr std::size_t OTAControlEncodedBytesV1 = 144U;')
+          once('    std::uint64_t activeSecurity = 0U;\n\n    if (!DurableDetail::ReadLE(cursor, end, nextTransaction) ||',
+               '    std::uint64_t activeSecurity = 0U;\n    std::uint32_t candidateBootTarget = 0U;\n    std::uint32_t previousCommittedBootTarget = 0U;\n\n    if (!DurableDetail::ReadLE(cursor, end, nextTransaction) ||')
 
-          replace_once(
-              '''    DurableDetail::WriteLE(cursor, record.Active.CandidateSecurity.Value());
-              *cursor++ = static_cast<std::uint8_t>(record.Active.Point);''',
-              '''    DurableDetail::WriteLE(cursor, record.Active.CandidateSecurity.Value());
-              DurableDetail::WriteLE(cursor, record.Active.CandidateBootTarget.Value());
-              DurableDetail::WriteLE(cursor, record.Active.PreviousCommittedBootTarget.Value());
-              *cursor++ = static_cast<std::uint8_t>(record.Active.Point);''')
+          once('    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) || cursor == end) return OTADurableStatus::Corrupt;\n    const auto recoveryRaw = *cursor++;',
+               '    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) ||\n        !DurableDetail::ReadLE(cursor, end, candidateBootTarget) ||\n        !DurableDetail::ReadLE(cursor, end, previousCommittedBootTarget) || cursor == end) {\n        return OTADurableStatus::Corrupt;\n    }\n    const auto recoveryRaw = *cursor++;')
 
-          replace_once(
-              '''    std::uint64_t activeSecurity = 0U;
+          once('    candidate.Active.CandidateSecurity = SecurityGeneration{activeSecurity};\n    candidate.Active.Point = static_cast<RecoveryPoint>(recoveryRaw);',
+               '    candidate.Active.CandidateSecurity = SecurityGeneration{activeSecurity};\n    candidate.Active.CandidateBootTarget = Platform::OTA::BootTargetIdentifier{candidateBootTarget};\n    candidate.Active.PreviousCommittedBootTarget = Platform::OTA::BootTargetIdentifier{previousCommittedBootTarget};\n    candidate.Active.Point = static_cast<RecoveryPoint>(recoveryRaw);')
 
-              if (!DurableDetail::ReadLE(cursor, end, nextTransaction) ||''',
-              '''    std::uint64_t activeSecurity = 0U;
-              std::uint32_t candidateBootTarget = 0U;
-              std::uint32_t previousCommittedBootTarget = 0U;
+          once('    OTADurableStatus ArmActivation(UpdateTransactionId transaction) noexcept {',
+               '    OTADurableStatus ArmActivation(\n        UpdateTransactionId transaction,\n        Platform::OTA::BootTargetIdentifier candidateBootTarget,\n        Platform::OTA::BootTargetIdentifier previousCommittedBootTarget) noexcept {\n        if (!transaction || !candidateBootTarget || !previousCommittedBootTarget ||\n            candidateBootTarget == previousCommittedBootTarget) return OTADurableStatus::Invalid;')
 
-              if (!DurableDetail::ReadLE(cursor, end, nextTransaction) ||''')
+          once('        record.Active.Point = RecoveryPoint::ActivationSelected;\n        record.Intent = DurableIntent::ActivationArmed;',
+               '        record.Active.CandidateBootTarget = candidateBootTarget;\n        record.Active.PreviousCommittedBootTarget = previousCommittedBootTarget;\n        record.Active.Point = RecoveryPoint::ActivationSelected;\n        record.Intent = DurableIntent::ActivationArmed;')
 
-          replace_once(
-              '''    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) || cursor == end) return OTADurableStatus::Corrupt;
-              const auto recoveryRaw = *cursor++;''',
-              '''    if (!DurableDetail::ReadLE(cursor, end, activeSecurity) ||
-                  !DurableDetail::ReadLE(cursor, end, candidateBootTarget) ||
-                  !DurableDetail::ReadLE(cursor, end, previousCommittedBootTarget) || cursor == end) {
-                  return OTADurableStatus::Corrupt;
-              }
-              const auto recoveryRaw = *cursor++;''')
-
-          replace_once(
-              '''    candidate.Active.CandidateSecurity = SecurityGeneration{activeSecurity};
-              candidate.Active.Point = static_cast<RecoveryPoint>(recoveryRaw);''',
-              '''    candidate.Active.CandidateSecurity = SecurityGeneration{activeSecurity};
-              candidate.Active.CandidateBootTarget = Platform::OTA::BootTargetIdentifier{candidateBootTarget};
-              candidate.Active.PreviousCommittedBootTarget = Platform::OTA::BootTargetIdentifier{previousCommittedBootTarget};
-              candidate.Active.Point = static_cast<RecoveryPoint>(recoveryRaw);''')
-
-          replace_once(
-              '''    OTADurableStatus ArmActivation(UpdateTransactionId transaction) noexcept {
-              const auto ready = MutationReady();
-              if (ready != OTADurableStatus::Success) return ready;
-              OTAControlRecord<TCapacityProfile> record;
-              auto status = ReadCommitted(record);
-              if (status != OTADurableStatus::Success) return status;
-              if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-              if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-              if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
-                  return OTADurableStatus::InvalidTransition;
-              }
-              record.Active.Point = RecoveryPoint::ActivationSelected;
-              record.Intent = DurableIntent::ActivationArmed;
-              return Commit(record);
-          }''',
-              '''    OTADurableStatus ArmActivation(
-              UpdateTransactionId transaction,
-              Platform::OTA::BootTargetIdentifier candidateBootTarget,
-              Platform::OTA::BootTargetIdentifier previousCommittedBootTarget) noexcept {
-              if (!transaction || !candidateBootTarget || !previousCommittedBootTarget ||
-                  candidateBootTarget == previousCommittedBootTarget) return OTADurableStatus::Invalid;
-              const auto ready = MutationReady();
-              if (ready != OTADurableStatus::Success) return ready;
-              OTAControlRecord<TCapacityProfile> record;
-              auto status = ReadCommitted(record);
-              if (status != OTADurableStatus::Success) return status;
-              if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
-              if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-              if (record.Intent != DurableIntent::None || record.Active.Point != RecoveryPoint::Staged) {
-                  return OTADurableStatus::InvalidTransition;
-              }
-              record.Active.CandidateBootTarget = candidateBootTarget;
-              record.Active.PreviousCommittedBootTarget = previousCommittedBootTarget;
-              record.Active.Point = RecoveryPoint::ActivationSelected;
-              record.Intent = DurableIntent::ActivationArmed;
-              return Commit(record);
-          }''')
-
-          replace_once(
-              '''        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-              if (record.Intent == DurableIntent::CommitIntent) return OTADurableStatus::InvalidTransition;
-              record.Active.Point = RecoveryPoint::RollbackStarted;
-              record.Intent = DurableIntent::RollbackIntent;
-              return Commit(record);''',
-              '''        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
-              if (record.Intent == DurableIntent::CommitIntent ||
-                  record.Active.Point < RecoveryPoint::ActivationSelected ||
-                  record.Active.Point == RecoveryPoint::RollbackStarted) return OTADurableStatus::InvalidTransition;
-              record.Active.Point = RecoveryPoint::RollbackStarted;
-              record.Intent = DurableIntent::RollbackIntent;
-              return Commit(record);''')
+          once('        if (record.Intent == DurableIntent::CommitIntent) return OTADurableStatus::InvalidTransition;\n        record.Active.Point = RecoveryPoint::RollbackStarted;',
+               '        if (record.Intent == DurableIntent::CommitIntent ||\n            record.Active.Point < RecoveryPoint::ActivationSelected ||\n            record.Active.Point == RecoveryPoint::RollbackStarted) return OTADurableStatus::InvalidTransition;\n        record.Active.Point = RecoveryPoint::RollbackStarted;')
 
           durable.write_text(text)
 
           test = Path('tests/ota_durable_test.cpp')
           text = test.read_text()
 
-          def test_replace_once(old, new):
+          def test_once(old, new):
               global text
-              if text.count(old) != 1:
-                  raise RuntimeError(f'expected exactly one test match, got {text.count(old)} for {old[:80]!r}')
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'test replacement count={count}: {old!r}')
               text = text.replace(old, new, 1)
 
-          test_replace_once(
-              'if (afterRestart.ArmActivation(first.Transaction) != OTADurableStatus::Success) return 16;',
-              'if (afterRestart.ArmActivation(first.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{2U}, ESPressio::Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 16;')
+          test_once('afterRestart.ArmActivation(first.Transaction)',
+                    'afterRestart.ArmActivation(first.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{2U}, ESPressio::Platform::OTA::BootTargetIdentifier{1U})')
 
-          test_replace_once(
-              '''    if (afterRestart.MarkTrialEntered(first.Transaction) != OTADurableStatus::Success) return 17;''',
-              '''    if (afterRestart.Load(loaded) != OTADurableStatus::Success ||
-              loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U} ||
-              loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{1U}) return 160;
-              if (afterRestart.MarkTrialEntered(first.Transaction) != OTADurableStatus::Success) return 17;''')
+          test_once('    if (afterRestart.MarkTrialEntered(first.Transaction) != OTADurableStatus::Success) return 17;',
+                    '    if (afterRestart.Load(loaded) != OTADurableStatus::Success ||\n        loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U} ||\n        loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{1U}) return 160;\n    if (afterRestart.MarkTrialEntered(first.Transaction) != OTADurableStatus::Success) return 17;')
 
-          test_replace_once(
-              '''    if (second.Transaction != UpdateTransactionId{2U} || second.CandidateGeneration != UpdateGenerationId{3U}) return 23;
-              if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::Success) return 24;''',
-              '''    if (second.Transaction != UpdateTransactionId{2U} || second.CandidateGeneration != UpdateGenerationId{3U}) return 23;
-              if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::InvalidTransition) return 230;
-              if (afterRestart.AdvanceRecoveryPoint(second.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 231;
-              if (afterRestart.ArmActivation(second.Transaction,
-                      ESPressio::Platform::OTA::BootTargetIdentifier{3U},
-                      ESPressio::Platform::OTA::BootTargetIdentifier{3U}) != OTADurableStatus::Invalid) return 232;
-              if (afterRestart.ArmActivation(second.Transaction,
-                      ESPressio::Platform::OTA::BootTargetIdentifier{3U},
-                      ESPressio::Platform::OTA::BootTargetIdentifier{2U}) != OTADurableStatus::Success) return 233;
-              if (afterRestart.Load(loaded) != OTADurableStatus::Success ||
-                  loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{3U} ||
-                  loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U}) return 234;
-              if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::Success) return 24;''')
+          test_once('    if (second.Transaction != UpdateTransactionId{2U} || second.CandidateGeneration != UpdateGenerationId{3U}) return 23;\n    if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::Success) return 24;',
+                    '    if (second.Transaction != UpdateTransactionId{2U} || second.CandidateGeneration != UpdateGenerationId{3U}) return 23;\n    if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::InvalidTransition) return 230;\n    if (afterRestart.AdvanceRecoveryPoint(second.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 231;\n    if (afterRestart.ArmActivation(second.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{3U}, ESPressio::Platform::OTA::BootTargetIdentifier{3U}) != OTADurableStatus::Invalid) return 232;\n    if (afterRestart.ArmActivation(second.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{3U}, ESPressio::Platform::OTA::BootTargetIdentifier{2U}) != OTADurableStatus::Success) return 233;\n    if (afterRestart.Load(loaded) != OTADurableStatus::Success ||\n        loaded.Active.CandidateBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{3U} ||\n        loaded.Active.PreviousCommittedBootTarget != ESPressio::Platform::OTA::BootTargetIdentifier{2U}) return 234;\n    if (afterRestart.PersistRollbackIntent(second.Transaction) != OTADurableStatus::Success) return 24;')
 
           test.write_text(text)
       - name: Remove transient refinement workflow
