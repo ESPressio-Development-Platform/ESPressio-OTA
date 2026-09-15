@@ -20,7 +20,30 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 Defining that symbol only for application compilation is not sufficient. The harness detects the application-side configuration and prints a warning when rollback support is absent, but the decisive evidence is actual bootloader behaviour: after candidate selection/reboot, the running candidate must report the ESP-IDF `PENDING_VERIFY` trial state.
 
-CI compilation therefore proves source/toolchain integration only. It must never be recorded as physical Trial/power-loss evidence.
+The PlatformIO project therefore has two deliberately different environments:
+
+```text
+esp32dev           Arduino/Arduino-IDE-equivalent compile path; uses the prebuilt Arduino bootloader
+esp32dev-rollback  Arduino as an ESP-IDF component; rebuilds bootloader from sdkconfig.defaults
+```
+
+The checked-in `sdkconfig.defaults` contains both:
+
+```text
+CONFIG_AUTOSTART_ARDUINO=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+```
+
+Build or flash the physical rollback laboratory with:
+
+```bash
+pio run -e esp32dev-rollback --project-dir demos/ota_esp32_coordinator_recovery/platformio
+pio run -e esp32dev-rollback -t upload --project-dir demos/ota_esp32_coordinator_recovery/platformio
+```
+
+CI additionally checks the merged environment-specific sdkconfig and requires a non-empty rollback-environment `bootloader.bin`; this protects against accidentally compiling only the application while ignoring the bootloader setting.
+
+CI compilation therefore proves source/toolchain/configuration integration only. It must never be recorded as physical Trial/power-loss evidence.
 
 ## Safety model
 
@@ -39,11 +62,11 @@ cancel NOW
 
 `status` and `help` are read-only.
 
-The durable backend is the ESP32 `NVSAtomicRecordStore` bound only to `OTAControlStore::RecordKey()`. This zero-Artifact lab never invokes Artifact checkpoint persistence.
+The durable backend is the ESP32 `NVSAtomicRecordStore` bound only to `OTAControlStore::RecordKey()`. This zero-Artifact lab never invokes Artifact checkpoint persistence. A subsequent Artifact-bearing laboratory will register the authoritative checkpoint record keys as well.
 
 ## Normal commit path
 
-1. Flash the harness with a rollback-enabled bootloader and the dual-OTA `min_spiffs.csv` partition layout.
+1. Flash the harness with the `esp32dev-rollback` environment and the dual-OTA `min_spiffs.csv` partition layout.
 2. Open Serial at 115200 baud and run `status`.
 3. Run `clone NOW` and allow the cooperative clone to reach `complete`.
 4. Run `start NOW`. This creates the durable transaction and binds the fixed lab Manifest/profile.

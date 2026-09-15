@@ -65,7 +65,7 @@ jobs:
           pio run --project-dir "${project}"
 
       - name: Build ESP32 Coordinator-recovery PlatformIO harness
-        run: pio run --project-dir demos/ota_esp32_coordinator_recovery/platformio
+        run: pio run -e esp32dev --project-dir demos/ota_esp32_coordinator_recovery/platformio
 
       - name: Build exact ESP32 Coordinator-recovery Arduino IDE sketch source
         shell: bash
@@ -76,4 +76,14 @@ jobs:
           rm "${project}/src/main.cpp"
           cp demos/ota_esp32_coordinator_recovery/arduino_ide/ota_esp32_coordinator_recovery/ota_esp32_coordinator_recovery.ino \
              "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
+          pio run -e esp32dev --project-dir "${project}"
+
+      - name: Build and verify ESP32 Coordinator-recovery rollback bootloader harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="demos/ota_esp32_coordinator_recovery/platformio"
+          pio run -e esp32dev-rollback --project-dir "${project}"
+          grep -Fx 'CONFIG_AUTOSTART_ARDUINO=y' "${project}/sdkconfig.esp32dev-rollback"
+          grep -Fx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "${project}/sdkconfig.esp32dev-rollback"
+          test -s "${project}/.pio/build/esp32dev-rollback/bootloader.bin"
