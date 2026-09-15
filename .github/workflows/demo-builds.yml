@@ -15,63 +15,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ota_v1
-      - name: Apply recovery fix
+      - name: Apply rollback target normalization
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('src/ESPressio_OTACoordinator.hpp')
           s = p.read_text()
-          if 'CandidateTrialRejected' not in s:
-              s = s.replace('    ArtifactSourceRetryExhausted\n};', '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1)
-          if 'bool activationRecovered_' not in s:
-              s = s.replace('    bool rollbackRestartIssued_{false};\n', '    bool rollbackRestartIssued_{false};\n    bool activationRecovered_{false};\n', 1)
-          if '        activationRecovered_ = false;\n        verifiedManifestBound_ = false;' not in s:
-              s = s.replace('        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;', '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
-          if 'activationRecovered_ = true;' not in s:
-              old = '            } else if (current != record.Active.PreviousCommittedBootTarget) {\n                return RecoveryRequired(&record);\n            }'
-              new = '            } else if (current == record.Active.PreviousCommittedBootTarget) {\n                activationRecovered_ = true;\n            } else {\n                return RecoveryRequired(&record);\n            }'
-              if old not in s: raise SystemExit('Initialize activation branch not found')
-              s = s.replace(old, new, 1)
-          if 'activationRestartIssued_ = false;\n        activationRecovered_ = false;' not in s:
-              old = '        componentLifecycle_.Reset();\n        activationRestartIssued_ = false;\n        if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'
-              new = '        componentLifecycle_.Reset();\n        activationRestartIssued_ = false;\n        activationRecovered_ = false;\n        if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'
-              if old not in s: raise SystemExit('BeginActivation reset not found')
-              s = s.replace(old, new, 1)
-          if 'const auto inspected = trial_.InspectBootTargetTrialState' not in s:
-              old = '        if (record.Intent == DurableIntent::ActivationArmed) {\n            const auto componentStep = AdvanceComponentLifecycle(\n                record, ComponentLifecycleOperation::Activate);'
-              lines = [
-                  '        if (record.Intent == DurableIntent::ActivationArmed) {',
-                  '            if (activationRecovered_) {',
-                  '                if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {',
-                  '                    return RecoveryRequired(&record);',
-                  '                } else {',
-                  '                    const auto inspected = trial_.InspectBootTargetTrialState(',
-                  '                        record.Active.CandidateBootTarget);',
-                  '                    if (!inspected) return RecoveryRequired(&record);',
-                  '                    switch (inspected.State) {',
-                  '                        case Platform::OTA::TrialBootState::NeverAttempted:',
-                  '                        case Platform::OTA::TrialBootState::Armed:',
-                  '                            activationRecovered_ = false;',
-                  '                            break;',
-                  '                        case Platform::OTA::TrialBootState::Rejected:',
-                  '                            activationRecovered_ = false;',
-                  '                            return StartRollback(record, CoordinatorDetail::CoreResult(',
-                  '                                OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));',
-                  '                        case Platform::OTA::TrialBootState::Unknown:',
-                  '                        case Platform::OTA::TrialBootState::Untracked:',
-                  '                        case Platform::OTA::TrialBootState::PendingValidation:',
-                  '                        case Platform::OTA::TrialBootState::Accepted:',
-                  '                            return RecoveryRequired(&record);',
-                  '                    }',
-                  '                }',
-                  '            }',
-                  '',
-                  '            const auto componentStep = AdvanceComponentLifecycle(',
-                  '                record, ComponentLifecycleOperation::Activate);'
-              ]
-              if old not in s: raise SystemExit('ActivationArmed advance block not found')
-              s = s.replace(old, '\n'.join(lines), 1)
-          if 'if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget)' not in s:
+          marker = 'const auto selected = CoordinatorDetail::PlatformResult(\n                        boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));'
+          if marker not in s:
               old = '            if (current == record.Active.PreviousCommittedBootTarget) {\n                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
               lines = [
                   '            if (current == record.Active.PreviousCommittedBootTarget) {',
@@ -84,7 +35,7 @@ jobs:
                   '                }',
                   '                if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'
               ]
-              if old not in s: raise SystemExit('Rollback normalization block not found')
+              if old not in s: raise SystemExit('Rollback previous-target branch not found')
               s = s.replace(old, '\n'.join(lines), 1)
           p.write_text(s)
           PY
@@ -94,5 +45,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/ESPressio_OTACoordinator.hpp
           git diff --cached --quiet && exit 0
-          git commit -m "fix: reconcile rejected OTA trial candidates"
+          git commit -m "fix: normalize rollback boot target before finalizing"
           git push origin HEAD:ota_v1
