@@ -11,6 +11,7 @@
 #include "ESPressio_OTAManifest.hpp"
 #include "ESPressio_OTAUpdatePlan.hpp"
 #include "ESPressio_OTAPolicyHealth.hpp"
+#include "ESPressio_OTAExecution.hpp"
 #include "ESPressio_OTAState.hpp"
 
 #include <ESPressio_PlatformClock.hpp>
@@ -30,6 +31,7 @@ enum class CoordinatorCoreReason : std::uint32_t {
     AwaitingRestart,
     VerifiedManifestRequired,
     VerifiedManifestMismatch,
+    TargetProfileRequired,
     UpdatePlanUnavailable,
     RequiredHealthUnavailable,
     TrialDeadlineExpired,
@@ -149,8 +151,11 @@ inline constexpr bool LegalImplementedTransition(UpdateLifecycle from, UpdateLif
             return to == UpdateLifecycle::Preparing || to == UpdateLifecycle::Cancelling ||
                    to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::Preparing:
+            return to == UpdateLifecycle::Staging || to == UpdateLifecycle::Cancelling ||
+                   to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::Staging:
-            return to == UpdateLifecycle::Cancelling || to == UpdateLifecycle::RecoveryRequired;
+            return to == UpdateLifecycle::Staged || to == UpdateLifecycle::Cancelling ||
+                   to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::Staged:
             return to == UpdateLifecycle::ActivationPending || to == UpdateLifecycle::Activating ||
                    to == UpdateLifecycle::Cancelling || to == UpdateLifecycle::RecoveryRequired;
@@ -215,6 +220,8 @@ class Coordinator final {
                   "Coordinator requires a monotonic Platform Clock");
 
     using ControlStore = OTAControlStore<TCapacityProfile>;
+    using StagePolicies = PolicyGateSet<StagePolicyDecisionPoint,
+        TCapacityProfile::MaximumPolicyProvidersPerDecisionPoint>;
     using ActivatePolicies = PolicyGateSet<ActivatePolicyDecisionPoint,
         TCapacityProfile::MaximumPolicyProvidersPerDecisionPoint>;
     using HealthChecks = HealthRegistry<TCapacityProfile::MaximumRequiredHealthConditions>;
@@ -225,11 +232,13 @@ class Coordinator final {
     TTrialBoot& trial_;
     TRestart& restart_;
     TClock& clock_;
+    StagePolicies stagePolicies_{};
     ActivatePolicies& activatePolicies_;
     HealthChecks& health_;
     ComponentHandlerDirectory<TCapacityProfile>& handlers_;
     ArtifactAcquisitionSession<TCapacityProfile> acquisition_;
     ArtifactVerificationSession<TCapacityProfile> verification_;
+    ComponentStagingSession<TCapacityProfile> staging_;
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -244,6 +253,7 @@ class Coordinator final {
     ManifestIdentifier boundManifest_{};
     bool verifiedManifestBound_{false};
     const Manifest<TCapacityProfile>* verifiedManifest_{nullptr};
+    const UpdateTargetProfile<TCapacityProfile>* targetProfile_{nullptr};
     UpdatePlan<TCapacityProfile> plan_{};
     std::size_t acquisitionArtifactIndex_{0U};
     bool acquisitionStarted_{false};
@@ -389,6 +399,22 @@ class Coordinator final {
         return true;
     }
 
+    void ClearBoundExecutionState() noexcept {
+        verifiedManifestBound_ = false;
+        verifiedManifest_ = nullptr;
+        targetProfile_ = nullptr;
+        boundManifest_ = {};
+        plan_ = {};
+        status_.UpdatePlanReady = false;
+        requiredHealthCount_ = 0U;
+        acquisitionArtifactIndex_ = 0U;
+        acquisitionStarted_ = false;
+        verificationArtifactIndex_ = 0U;
+        verificationStarted_ = false;
+        trialClockStarted_ = false;
+        healthEvaluated_ = false;
+    }
+
     bool PublishTerminal(const OTAControlRecord<TCapacityProfile>& record,
                          UpdateTransactionId transaction,
                          TerminalUpdateOutcome outcome,
@@ -417,18 +443,7 @@ class Coordinator final {
         status_.HasLifecycle = false;
         status_.Lifecycle = UpdateLifecycle::Idle;
         status_.VerifiedManifestBound = false;
-        verifiedManifestBound_ = false;
-        verifiedManifest_ = nullptr;
-        boundManifest_ = {};
-        plan_ = {};
-        status_.UpdatePlanReady = false;
-        requiredHealthCount_ = 0U;
-        acquisitionArtifactIndex_ = 0U;
-        acquisitionStarted_ = false;
-        verificationArtifactIndex_ = 0U;
-        verificationStarted_ = false;
-        trialClockStarted_ = false;
-        healthEvaluated_ = false;
+        ClearBoundExecutionState();
         return true;
     }
 
@@ -570,6 +585,82 @@ class Coordinator final {
         return {OutcomeClass::Pending, {}};
     }
 
+    Result FailStaging(OTAControlRecord<TCapacityProfile>& record, const Result& failure) noexcept {
+        const auto transaction = record.Active.Transaction;
+        const auto abandoned = control_.AbandonTransaction(transaction);
+        if (abandoned != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(abandoned);
+        if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        const auto terminal = CoordinatorDetail::TerminalOutcomeFor(failure);
+        return PublishTerminal(record, transaction, terminal, UpdateOperation::Stage, failure)
+            ? failure : ProjectionFailure();
+    }
+
+    Result CompleteStaging(OTAControlRecord<TCapacityProfile>& record) noexcept {
+        const auto staged = control_.AdvanceRecoveryPoint(record.Active.Transaction, RecoveryPoint::Staged);
+        if (staged != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(staged);
+        if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        if (!PublishActive(record, UpdateLifecycle::Staged, false)) return ProjectionFailure();
+        return {OutcomeClass::Pending, {}};
+    }
+
+    Result AdvanceStaging(OTAControlRecord<TCapacityProfile>& record) noexcept {
+        if (!verifiedManifestBound_ || verifiedManifest_ == nullptr || boundManifest_ != record.Active.Manifest) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::VerifiedManifestRequired);
+        }
+        if (targetProfile_ == nullptr || !targetProfile_->IsFrozen()) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::TargetProfileRequired);
+        }
+        if (!status_.UpdatePlanReady || !plan_.IsReady()) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::UpdatePlanUnavailable);
+        }
+
+        if (record.Active.Point == RecoveryPoint::ArtifactsVerified) {
+            const auto preflight = PreflightUpdatePlan(
+                plan_, *targetProfile_, record.Active.Transaction, record.Active.CandidateGeneration);
+            if (preflight.Outcome == OutcomeClass::Pending || preflight.Outcome == OutcomeClass::Deferred) return preflight;
+            if (!preflight) return FailStaging(record, preflight);
+
+            const auto started = control_.AdvanceRecoveryPoint(
+                record.Active.Transaction, RecoveryPoint::StagingStarted);
+            if (started != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(started);
+            if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+            if (!PublishActive(record, UpdateLifecycle::Staging, false)) return ProjectionFailure();
+
+            const auto begun = staging_.Begin(
+                *verifiedManifest_, plan_, *targetProfile_, record.Active.Transaction,
+                record.Active.CandidateGeneration, record.Committed.Generation, false);
+            if (staging_.IsComplete()) return CompleteStaging(record);
+            if (begun.Outcome == OutcomeClass::Pending || begun.Outcome == OutcomeClass::Deferred) return begun;
+            if (!begun) return FailStaging(record, begun);
+            return {OutcomeClass::Pending, {}};
+        }
+
+        if (record.Active.Point != RecoveryPoint::StagingStarted) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+
+        if (!staging_.IsActive() && !staging_.IsComplete()) {
+            const auto begun = staging_.Begin(
+                *verifiedManifest_, plan_, *targetProfile_, record.Active.Transaction,
+                record.Active.CandidateGeneration, record.Committed.Generation, true);
+            if (staging_.IsComplete()) return CompleteStaging(record);
+            if (!staging_.IsActive()) {
+                if (begun.Outcome == OutcomeClass::Pending || begun.Outcome == OutcomeClass::Deferred) return begun;
+                return RecoveryRequired(&record);
+            }
+            if (begun.Outcome != OutcomeClass::Pending && begun.Outcome != OutcomeClass::Deferred && !begun) {
+                return RecoveryRequired(&record);
+            }
+        }
+
+        const auto step = staging_.Advance();
+        if (staging_.IsComplete()) return CompleteStaging(record);
+        if (staging_.Phase() == ComponentStagingPhase::Failed) return FailStaging(record, step);
+        if (step.Outcome == OutcomeClass::Pending || step.Outcome == OutcomeClass::Deferred) return step;
+        if (!step) return FailStaging(record, step);
+        return {OutcomeClass::Pending, {}};
+    }
+
     static std::uint64_t TicksToNanoseconds(Platform::Clock::Tick ticks) noexcept {
         constexpr std::uint64_t frequency = Platform::Clock::FrequencyHz<TClock>;
         constexpr std::uint64_t billion = Platform::Clock::NanosecondsPerSecond;
@@ -688,8 +779,13 @@ public:
           activatePolicies_(activatePolicies), health_(health), handlers_(handlers),
           acquisition_(artifactSource, artifactStore, artifactCheckpoints, artifactWorkspace),
           verification_(artifactStore, digestVerifier, artifactWorkspace),
+          staging_(artifactStore, stagePolicies_),
           trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
+
+    PolicyGateRegistrationStatus AddStagePolicy(IPolicyGate<StagePolicyDecisionPoint>& gate) noexcept {
+        return stagePolicies_.Add(gate);
+    }
 
     Result Initialize() noexcept {
         MutationGuard guard{*this};
@@ -754,12 +850,17 @@ public:
 
     CoordinatorStatusSnapshot Status() const noexcept { return status_; }
 
-    Result BindVerifiedManifest(const Manifest<TCapacityProfile>& manifest) noexcept {
+    Result BindVerifiedManifest(
+        const Manifest<TCapacityProfile>& manifest,
+        const UpdateTargetProfile<TCapacityProfile>& targetProfile) noexcept {
         MutationGuard guard{*this};
         if (!guard) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::ReentrantMutation);
         if (!initialized_) return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::NotInitialized);
-        if (acquisitionStarted_ || acquisition_.IsActive() || verificationStarted_ || verification_.IsActive()) {
+        if (acquisitionStarted_ || acquisition_.IsActive() || verificationStarted_ || verification_.IsActive() || staging_.IsActive()) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Unavailable, CoordinatorCoreReason::Busy);
+        }
+        if (!targetProfile.IsFrozen()) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::TargetProfileRequired);
         }
         if (ValidateManifest(manifest) != ManifestStatus::Success) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::VerifiedManifestMismatch);
@@ -793,6 +894,10 @@ public:
             }
         }
 
+        const auto preflight = PreflightUpdatePlan(
+            candidatePlan, targetProfile, record.Active.Transaction, record.Active.CandidateGeneration);
+        if (!preflight) return preflight;
+
         if (record.Active.Point == RecoveryPoint::TransactionCreated) {
             const auto accepted = control_.AdvanceRecoveryPoint(
                 record.Active.Transaction, RecoveryPoint::ManifestAccepted);
@@ -809,6 +914,7 @@ public:
         }
         plan_ = candidatePlan;
         verifiedManifest_ = &manifest;
+        targetProfile_ = &targetProfile;
         boundManifest_ = identifier;
         verifiedManifestBound_ = true;
         acquisitionArtifactIndex_ = 0U;
@@ -819,7 +925,7 @@ public:
         status_.UpdatePlanReady = true;
         const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
         if (!PublishActive(record, CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point),
-                           executingCandidate)) {
+                           executingCandidate, true)) {
             return ProjectionFailure();
         }
         status_.VerifiedManifestBound = true;
@@ -846,18 +952,7 @@ public:
         const auto begun = control_.BeginTransaction(request.Release, request.Manifest, request.CandidateSecurity, active);
         if (begun != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(begun);
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
-        verifiedManifestBound_ = false;
-        verifiedManifest_ = nullptr;
-        boundManifest_ = {};
-        plan_ = {};
-        status_.UpdatePlanReady = false;
-        requiredHealthCount_ = 0U;
-        acquisitionArtifactIndex_ = 0U;
-        acquisitionStarted_ = false;
-        verificationArtifactIndex_ = 0U;
-        verificationStarted_ = false;
-        trialClockStarted_ = false;
-        healthEvaluated_ = false;
+        ClearBoundExecutionState();
         hasLifecycle_ = false;
         lifecycle_ = UpdateLifecycle::Idle;
         if (!PublishActive(record, UpdateLifecycle::Checking, false, true)) return ProjectionFailure();
@@ -1038,14 +1133,14 @@ public:
             return EvaluateHealth(record);
         }
 
-        if (record.Active.Point == RecoveryPoint::ManifestAccepted) {
-            return AdvanceAcquisition(record);
+        if (record.Active.Point == RecoveryPoint::ManifestAccepted) return AdvanceAcquisition(record);
+        if (record.Active.Point == RecoveryPoint::ArtifactsAcquired) return AdvanceVerification(record);
+        if (record.Active.Point == RecoveryPoint::ArtifactsVerified ||
+            record.Active.Point == RecoveryPoint::StagingStarted) return AdvanceStaging(record);
+        if (record.Active.Point == RecoveryPoint::Staged) {
+            if (!PublishActive(record, UpdateLifecycle::Staged, false, true)) return ProjectionFailure();
+            return {OutcomeClass::Pending, {}};
         }
-
-        if (record.Active.Point == RecoveryPoint::ArtifactsAcquired) {
-            return AdvanceVerification(record);
-        }
-
         if (record.Active.Point < RecoveryPoint::ActivationSelected) {
             if (!PublishActive(record, CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point), false, true)) return ProjectionFailure();
             return CoordinatorDetail::CoreResult(OutcomeClass::Pending, CoordinatorCoreReason::AwaitingExecutionIntegration);
