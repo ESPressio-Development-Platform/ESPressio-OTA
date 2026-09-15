@@ -2,20 +2,21 @@ name: OTA Candidate Trial Recovery Fix
 
 on:
   push:
-    branches: [ota_v1]
+    branches:
+      - ota_v1
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ota_v1
-      - name: Patch Coordinator candidate recovery
+      - name: Apply Coordinator recovery fix
+        shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -24,34 +25,26 @@ jobs:
           s = p.read_text()
 
           if 'CandidateTrialRejected' not in s:
-              anchor = '    ArtifactSourceRetryExhausted\n};'
-              if anchor not in s: raise RuntimeError('reason anchor missing')
-              s = s.replace(anchor, '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1)
-
+              s = s.replace('    ArtifactSourceRetryExhausted\n};',
+                            '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1)
           if 'bool activationRecovered_' not in s:
-              anchor = '    bool rollbackRestartIssued_{false};\n'
-              if anchor not in s: raise RuntimeError('member anchor missing')
-              s = s.replace(anchor, anchor + '    bool activationRecovered_{false};\n', 1)
-
-          clear_anchor = '        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;'
-          if clear_anchor in s:
-              s = s.replace(clear_anchor,
-                  '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
+              s = s.replace('    bool rollbackRestartIssued_{false};\n',
+                            '    bool rollbackRestartIssued_{false};\n    bool activationRecovered_{false};\n', 1)
+          if '        activationRecovered_ = false;\n        verifiedManifestBound_ = false;' not in s:
+              s = s.replace('        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;',
+                            '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
 
           init_old = '''            } else if (current != record.Active.PreviousCommittedBootTarget) {
               return RecoveryRequired(&record);
-          }
-              lifecycle = UpdateLifecycle::Activating;'''
+          }'''
           init_new = '''            } else if (current == record.Active.PreviousCommittedBootTarget) {
               activationRecovered_ = true;
           } else {
               return RecoveryRequired(&record);
-          }
-              lifecycle = UpdateLifecycle::Activating;'''
-          if init_old in s:
+          }'''
+          if 'activationRecovered_ = true;' not in s:
+              if init_old not in s: raise SystemExit('Initialize activation branch not found')
               s = s.replace(init_old, init_new, 1)
-          elif 'activationRecovered_ = true;' not in s:
-              raise RuntimeError('Initialize activation anchor missing')
 
           begin_old = '''        componentLifecycle_.Reset();
               activationRestartIssued_ = false;
@@ -60,10 +53,11 @@ jobs:
               activationRestartIssued_ = false;
               activationRecovered_ = false;
               if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'''
-          if begin_old in s:
+          if 'activationRestartIssued_ = false;\n        activationRecovered_ = false;' not in s:
+              if begin_old not in s: raise SystemExit('BeginActivation reset not found')
               s = s.replace(begin_old, begin_new, 1)
 
-          advance_anchor = '''        if (record.Intent == DurableIntent::ActivationArmed) {
+          advance_old = '''        if (record.Intent == DurableIntent::ActivationArmed) {
               const auto componentStep = AdvanceComponentLifecycle(
                   record, ComponentLifecycleOperation::Activate);'''
           advance_new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
@@ -94,12 +88,11 @@ jobs:
 
               const auto componentStep = AdvanceComponentLifecycle(
                   record, ComponentLifecycleOperation::Activate);'''
-          if advance_anchor in s:
-              s = s.replace(advance_anchor, advance_new, 1)
-          elif 'InspectBootTargetTrialState' not in s:
-              raise RuntimeError('Advance activation anchor missing')
+          if 'const auto inspected = trial_.InspectBootTargetTrialState' not in s:
+              if advance_old not in s: raise SystemExit('ActivationArmed advance block not found')
+              s = s.replace(advance_old, advance_new, 1)
 
-          rollback_anchor = '''            if (current == record.Active.PreviousCommittedBootTarget) {
+          rollback_old = '''            if (current == record.Active.PreviousCommittedBootTarget) {
                   if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
           rollback_new = '''            if (current == record.Active.PreviousCommittedBootTarget) {
                   if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
@@ -110,22 +103,17 @@ jobs:
                       return {OutcomeClass::Pending, {}};
                   }
                   if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
-          if rollback_anchor in s:
-              s = s.replace(rollback_anchor, rollback_new, 1)
-          elif 'const auto selected = CoordinatorDetail::PlatformResult' not in s:
-              raise RuntimeError('rollback normalization anchor missing')
+          if 'if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget)' not in s:
+              if rollback_old not in s: raise SystemExit('Rollback previous-target block not found')
+              s = s.replace(rollback_old, rollback_new, 1)
+
           p.write_text(s)
 
           p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
           s = p.read_text()
           if 'Platform::OTA::TrialBootState CandidateState' not in s:
-              anchor = '    bool Trial{false};\n'
-              if anchor not in s: raise RuntimeError('Trial field anchor missing')
-              s = s.replace(anchor, anchor +
-                  '    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};\n'
-                  '    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};\n'
-                  '    mutable std::size_t InspectCalls{0U};\n', 1)
-
+              s = s.replace('    bool Trial{false};\n',
+                            '    bool Trial{false};\n    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};\n    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};\n    mutable std::size_t InspectCalls{0U};\n', 1)
           if 'InspectBootTargetTrialState' not in s:
               anchor = '    Platform::OTA::Result MarkCurrentBootValid() noexcept {'
               method = '''    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
@@ -133,17 +121,16 @@ jobs:
                   ++InspectCalls;
                   if (!target) return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
                   return {InspectStatus,
-                      InspectStatus == Platform::OTA::Status::Success
-                          ? CandidateState : Platform::OTA::TrialBootState::Unknown,
+                      InspectStatus == Platform::OTA::Status::Success ? CandidateState : Platform::OTA::TrialBootState::Unknown,
                       InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
               }
-              '''
-              if anchor not in s: raise RuntimeError('MarkCurrentBootValid anchor missing')
+'''
+              if anchor not in s: raise SystemExit('FaultTrialBoot method anchor not found')
               s = s.replace(anchor, method + anchor, 1)
 
           if 'recovered ActivationArmed must never re-arm it' not in s:
               anchor = '#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2'
-              regression = '''    // If the platform has already rejected the candidate after a Trial reset,
+              regression = '''    // If the platform rejected the candidate after a Trial reset,
               // recovered ActivationArmed must never re-arm it. Persist rollback instead.
               {
                   Fixture fixture;
@@ -179,13 +166,15 @@ jobs:
                   if (fixture.Control.Load(record) != OTADurableStatus::Success || record.HasActiveTransaction ||
                       record.Committed.Generation != UpdateGenerationId{1U}) return 60;
               }
-          '''
-              if anchor not in s: raise RuntimeError('scenario 2 anchor missing')
+'''
+              if anchor not in s: raise SystemExit('scenario anchor not found')
               s = s.replace(anchor, regression + anchor, 1)
           p.write_text(s)
           PY
-      - name: Commit fix
+      - name: Commit fix if changed
+        shell: bash
         run: |
+          if git diff --quiet -- src/ESPressio_OTACoordinator.hpp tests/ota_coordinator_platform_recovery_test.cpp; then exit 0; fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/ESPressio_OTACoordinator.hpp tests/ota_coordinator_platform_recovery_test.cpp
