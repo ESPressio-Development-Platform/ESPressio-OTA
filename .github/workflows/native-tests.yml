@@ -87,5 +87,7 @@ jobs:
         run: cmake --build build --parallel
       - name: OTA constrained object footprint report
         run: ./build/tests/espressio_ota_offer_test
+      - name: OTA retained-memory accounting report
+        run: ./build/tests/espressio_ota_memory_accounting_test
       - name: Test
         run: ctest --test-dir build --output-on-failure
