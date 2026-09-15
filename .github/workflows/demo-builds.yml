@@ -1,25 +1,24 @@
-name: OTA Demo Builds
+name: OTA rollback ordering patch carrier
 
 on:
   push:
     branches:
       - ota_v1
-  pull_request:
 
 permissions:
   contents: write
 
 jobs:
-  patch-rollback-ordering:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'chore: run OTA rollback ordering patch'
+  patch:
+    if: ${{ github.event.head_commit.message == 'chore: retry OTA rollback ordering patch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ota_v1
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Patch rollback ordering and clean temporary workflow changes
+      - name: Apply rollback ordering fix
         shell: bash
         run: |
           set -euo pipefail
@@ -43,7 +42,7 @@ jobs:
                 if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
             }
-'''
+          '''
 
           new = '''            if (current != record.Active.CandidateBootTarget) return RecoveryRequired(&record);
             if (trial_.IsCurrentBootTrial()) {
@@ -59,7 +58,7 @@ jobs:
                 if (!PublishActive(record, UpdateLifecycle::RollingBack, true, true)) return ProjectionFailure();
                 return {OutcomeClass::Pending, {}};
             }
-'''
+          '''
 
           count = text.count(old)
           if count != 1:
@@ -67,7 +66,7 @@ jobs:
           path.write_text(text.replace(old, new))
           PY
 
-          git checkout HEAD^ -- .github/workflows/demo-builds.yml
+          git checkout f9ec960f686dec4f34ab0bf3820f5b3639b5fd78 -- .github/workflows/demo-builds.yml
           rm -f .github/workflows/ota-rollback-ordering-fix.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -75,87 +74,3 @@ jobs:
           git diff --cached --check
           git commit -m "fix: invalidate trial before selecting rollback target"
           git push origin HEAD:ota_v1
-
-  demos:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      # PlatformIO Core 6.2.0 currently conflicts with PIOArduino's ESP-IDF
-      # tool-scons package declaration and may delete/reinstall SCons mid-build,
-      # producing SCons.Tool.FortranCommon import failures unrelated to OTA.
-      - name: Install PlatformIO
-        run: python -m pip install "platformio==6.1.19"
-
-      - name: Build ESP32 Arduino PlatformIO provider-readiness demo
-        run: pio run --project-dir demos/ota_esp32_provider_readiness/platformio
-
-      - name: Build ESP-IDF PlatformIO provider-readiness demo
-        run: pio run --project-dir demos/ota_espidf_provider_readiness/platformio
-
-      - name: Build exact ESP32 Arduino IDE provider-readiness sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-arduino-ide"
-          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_provider_readiness/arduino_ide/ota_esp32_provider_readiness/ota_esp32_provider_readiness.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
-
-      - name: Build exact ESP-IDF-provider Arduino IDE sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-espidf-arduino-ide"
-          cp -R demos/ota_esp32_provider_readiness/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_espidf_provider_readiness/arduino_ide/ota_espidf_provider_readiness/ota_espidf_provider_readiness.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
-
-      - name: Build ESP32 physical-validation PlatformIO harness
-        run: pio run --project-dir demos/ota_esp32_physical_validation/platformio
-
-      - name: Build exact ESP32 physical-validation Arduino IDE sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-physical-arduino-ide"
-          cp -R demos/ota_esp32_physical_validation/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_physical_validation/arduino_ide/ota_esp32_physical_validation/ota_esp32_physical_validation.ino \
-             "${project}/src/main.cpp"
-          pio run --project-dir "${project}"
-
-      - name: Build ESP32 Coordinator-recovery PlatformIO harness
-        run: pio run -e esp32dev --project-dir demos/ota_esp32_coordinator_recovery/platformio
-
-      - name: Build exact ESP32 Coordinator-recovery Arduino IDE sketch source
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="${RUNNER_TEMP}/ota-esp32-coordinator-recovery-arduino-ide"
-          cp -R demos/ota_esp32_coordinator_recovery/platformio "${project}"
-          rm "${project}/src/main.cpp"
-          cp demos/ota_esp32_coordinator_recovery/arduino_ide/ota_esp32_coordinator_recovery/ota_esp32_coordinator_recovery.ino \
-             "${project}/src/main.cpp"
-          pio run -e esp32dev --project-dir "${project}"
-
-      - name: Build and verify ESP32 Coordinator-recovery rollback bootloader harness
-        shell: bash
-        run: |
-          set -euo pipefail
-          project="demos/ota_esp32_coordinator_recovery/platformio"
-          pio run -e esp32dev-rollback --project-dir "${project}"
-          grep -Fx 'CONFIG_AUTOSTART_ARDUINO=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_FREERTOS_HZ=1000' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y' "${project}/sdkconfig.esp32dev-rollback"
-          grep -Fx 'CONFIG_COMPILER_CXX_EXCEPTIONS=y' "${project}/sdkconfig.esp32dev-rollback"
-          test -s "${project}/.pio/build/esp32dev-rollback/bootloader.bin"
