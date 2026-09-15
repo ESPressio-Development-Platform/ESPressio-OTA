@@ -190,7 +190,7 @@ public:
     }
 };
 
-Manifest<Capacity> CandidateManifest(std::uint8_t id,
+[[maybe_unused]] Manifest<Capacity> CandidateManifest(std::uint8_t id,
                                      std::uint64_t release,
                                      std::uint64_t security,
                                      bool requireHealth = true) {
@@ -248,7 +248,7 @@ struct Fixture final {
     }
 };
 
-bool AdvanceToStaged(OTAControlStore<Capacity>& control, UpdateTransactionId transaction) {
+[[maybe_unused]] bool AdvanceToStaged(OTAControlStore<Capacity>& control, UpdateTransactionId transaction) {
     return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ManifestAccepted) == OTADurableStatus::Success &&
            control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&
            control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsVerified) == OTADurableStatus::Success &&
