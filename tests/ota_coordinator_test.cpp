@@ -818,6 +818,42 @@ int main() {
             fixture.ComponentHandler.Recovery != ComponentRecoveryState::Staged) return 106;
     }
 
+#elif ESPRESSIO_OTA_COORDINATOR_SCENARIO == 6
+    {
+        Fixture fixture;
+        if (!fixture.InitializeState()) return 120;
+        if (fixture.Control.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 121;
+        auto coordinator = fixture.MakeCoordinator(5'000'000'000ULL);
+        if (!coordinator.Initialize()) return 122;
+
+        auto manifest = CandidateManifest(60U, 60U, 1U, false);
+        // The package is structurally valid but the signed candidate-runtime
+        // declaration says it can read only durable schema V2, while this
+        // active transaction is inherited in V1. It must never be armed.
+        manifest.CandidateDurableSchemaSupport = OTAVersionSupport{2U, 2U, 2U};
+        if (ValidateManifest(manifest) != ManifestStatus::Success) return 123;
+
+        UpdateTransactionId transaction;
+        if (!coordinator.Start({ReleaseIdentifier{60U}, ManifestIdentifier{Id(60U)}, SecurityGeneration{1U}}, transaction)) return 124;
+        if (!coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 125;
+        if (!DriveToStaged(coordinator, fixture.Control, transaction)) return 126;
+
+        const auto rejected = coordinator.BeginActivation(
+            {transaction, Platform::OTA::BootTargetIdentifier{2U}, true, true, true});
+        if (rejected.Outcome != OutcomeClass::Unsupported ||
+            rejected.Detail.Domain != DiagnosticDomain::OTA ||
+            rejected.Detail.Reason != static_cast<std::uint32_t>(
+                CoordinatorCoreReason::CandidateCannotReadCurrentOTASchema)) return 127;
+
+        OTAControlRecord<Capacity> stillStaged;
+        if (fixture.Control.Load(stillStaged) != OTADurableStatus::Success ||
+            stillStaged.Intent != DurableIntent::None ||
+            stillStaged.Active.Point != RecoveryPoint::Staged ||
+            stillStaged.Active.CandidateBootTarget ||
+            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
+            fixture.ComponentHandler.ActivateCalls != 0U) return 128;
+    }
+
 #else
 #error Unsupported ESPRESSIO_OTA_COORDINATOR_SCENARIO
 #endif
