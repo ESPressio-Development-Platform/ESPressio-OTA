@@ -48,13 +48,6 @@ inline constexpr bool Transient(const Result& result) noexcept {
 
 } // namespace ComponentExecutionDetail
 
-/**
- * Serializes access to a retained Artifact store whose read interface exposes a
- * single cursor. A handler may retain multiple verified reader objects, but V1
- * deliberately permits only one of them to own the underlying store cursor at
- * a time. This prevents accidental cross-Artifact cursor corruption without
- * allocating a reader per store backend.
- */
 class RetainedArtifactReadLease final {
     IReadableArtifactStore& store_;
     const void* owner_{nullptr};
@@ -104,11 +97,6 @@ public:
     }
 };
 
-/**
- * Read-only verified Artifact view backed by the immutable retained Artifact
- * store. Verification metadata is copied from the already trusted Manifest;
- * Reset() always reopens the immutable object from byte zero.
- */
 template<typename TCapacityProfile>
 class RetainedVerifiedArtifactReader final : public IVerifiedArtifactReader<TCapacityProfile> {
     static_assert(TCapacityProfile::IsValid,
@@ -223,12 +211,6 @@ const ManifestArtifact<TCapacityProfile>* FindManifestArtifact(
     return nullptr;
 }
 
-/**
- * Runs the non-mutating handler Preflight surface in deterministic plan order.
- * This is intentionally separate from ComponentStagingSession so the Coordinator
- * can reject/defer before Artifact acquisition begins and can repeat runtime
- * preflight at the Stage boundary without beginning mutation.
- */
 template<typename TCapacityProfile>
 Result PreflightUpdatePlan(
     const UpdatePlan<TCapacityProfile>& plan,
@@ -269,20 +251,6 @@ enum class ComponentStagingPhase : std::uint8_t {
     Failed
 };
 
-/**
- * Cooperative, allocation-free execution of Prepare -> Stage -> FinalizeStage
- * over an immutable UpdatePlan. One handler method is invoked per Advance().
- *
- * Stage Policy is evaluated exactly when a component is about to cross from an
- * unmutated Preparing boundary into Prepare. An Allow is latched for that
- * component so cooperative Pending work is never re-gated after mutation has
- * begun. Recovery of PartiallyStaged work bypasses ordinary application policy:
- * reconciliation is safety behavior, not a fresh Stage authorization.
- *
- * Durable StagingStarted/Staged transitions remain Coordinator-owned. The
- * session therefore requires the caller to persist StagingStarted before Begin
- * and to persist Staged only after IsComplete() becomes true.
- */
 template<typename TCapacityProfile>
 class ComponentStagingSession final {
     static_assert(TCapacityProfile::IsValid,
@@ -435,6 +403,20 @@ public:
     bool IsComplete() const noexcept { return phase_ == ComponentStagingPhase::Complete; }
     std::size_t ComponentIndex() const noexcept { return componentIndex_; }
 
+    void Reset() noexcept {
+        ReleaseArtifactBindings();
+        manifest_ = nullptr;
+        plan_ = nullptr;
+        targetProfile_ = nullptr;
+        policyCommon_ = {};
+        transaction_ = {};
+        candidateGeneration_ = {};
+        componentIndex_ = 0U;
+        phase_ = ComponentStagingPhase::Idle;
+        active_ = false;
+        stagePolicyAllowed_ = false;
+    }
+
     Result Begin(
         const Manifest<TCapacityProfile>& manifest,
         const UpdatePlan<TCapacityProfile>& plan,
@@ -448,7 +430,7 @@ public:
             return ComponentExecutionDetail::Failure(
                 OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration);
         }
-        ReleaseArtifactBindings();
+        Reset();
         manifest_ = &manifest;
         plan_ = &plan;
         targetProfile_ = &targetProfile;
