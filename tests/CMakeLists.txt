@@ -107,6 +107,11 @@ target_compile_options(espressio_ota_coordinator_staging_recovery_test PRIVATE $
 target_compile_definitions(espressio_ota_coordinator_staging_recovery_test PRIVATE ESPRESSIO_OTA_COORDINATOR_SCENARIO=5)
 add_test(NAME espressio_ota_coordinator_staging_recovery_test COMMAND espressio_ota_coordinator_staging_recovery_test)
 
+add_executable(espressio_ota_optional_bridges_test ota_optional_bridges_test.cpp)
+target_link_libraries(espressio_ota_optional_bridges_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_optional_bridges_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+add_test(NAME espressio_ota_optional_bridges_test COMMAND espressio_ota_optional_bridges_test)
+
 # ESPressio-Units' own host tests provide a repository-owned Arduino compatibility
 # stub. Reuse that test-only surface for native OTA tests that reach Units through
 # State/Timing. Never expose the stub from OTA's production INTERFACE target.
@@ -130,6 +135,7 @@ set(ESPRESSIO_OTA_NATIVE_TEST_TARGETS
     espressio_ota_coordinator_rollback_test
     espressio_ota_coordinator_acquisition_test
     espressio_ota_coordinator_staging_recovery_test
+    espressio_ota_optional_bridges_test
 )
 set(_espressio_units_test_stubs "${CMAKE_CURRENT_SOURCE_DIR}/../deps/ESPressio-Units/tests/stubs")
 if(EXISTS "${_espressio_units_test_stubs}")
