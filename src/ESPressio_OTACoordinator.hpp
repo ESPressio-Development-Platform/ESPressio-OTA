@@ -7,6 +7,7 @@
 
 #include "ESPressio_OTADurable.hpp"
 #include "ESPressio_OTAManifest.hpp"
+#include "ESPressio_OTAUpdatePlan.hpp"
 #include "ESPressio_OTAPolicyHealth.hpp"
 #include "ESPressio_OTAState.hpp"
 
@@ -27,6 +28,8 @@ enum class CoordinatorCoreReason : std::uint32_t {
     AwaitingRestart,
     VerifiedManifestRequired,
     VerifiedManifestMismatch,
+    UpdatePlanUnavailable,
+    RequiredHealthUnavailable,
     TrialDeadlineExpired,
     BootTargetMismatch,
     InvalidLifecycleTransition,
@@ -70,6 +73,7 @@ struct CoordinatorStatusSnapshot final {
     bool HasLifecycle{false};
     UpdateLifecycle Lifecycle{UpdateLifecycle::Idle};
     bool VerifiedManifestBound{false};
+    bool UpdatePlanReady{false};
 };
 
 namespace CoordinatorDetail {
@@ -131,6 +135,8 @@ inline constexpr bool LegalImplementedTransition(UpdateLifecycle from, UpdateLif
     switch (from) {
         case UpdateLifecycle::Idle: return to == UpdateLifecycle::Checking;
         case UpdateLifecycle::Checking:
+            return to == UpdateLifecycle::CandidateSelected || to == UpdateLifecycle::Cancelling ||
+                   to == UpdateLifecycle::RecoveryRequired;
         case UpdateLifecycle::CandidateSelected:
         case UpdateLifecycle::Preparing:
         case UpdateLifecycle::Acquiring:
@@ -204,6 +210,7 @@ class Coordinator final {
     TClock& clock_;
     ActivatePolicies& activatePolicies_;
     HealthChecks& health_;
+    ComponentHandlerDirectory<TCapacityProfile>& handlers_;
     std::uint64_t trialTimeoutNanoseconds_{0U};
     std::uint64_t healthReevaluationNanoseconds_{0U};
 
@@ -217,6 +224,8 @@ class Coordinator final {
     std::size_t requiredHealthCount_{0U};
     ManifestIdentifier boundManifest_{};
     bool verifiedManifestBound_{false};
+    const Manifest<TCapacityProfile>* verifiedManifest_{nullptr};
+    UpdatePlan<TCapacityProfile> plan_{};
     bool trialClockStarted_{false};
     Platform::Clock::Tick trialStartTick_{0U};
     Platform::Clock::Tick lastHealthEvaluationTick_{0U};
@@ -386,6 +395,9 @@ class Coordinator final {
         status_.Lifecycle = UpdateLifecycle::Idle;
         status_.VerifiedManifestBound = false;
         verifiedManifestBound_ = false;
+        verifiedManifest_ = nullptr;
+        plan_ = {};
+        status_.UpdatePlanReady = false;
         requiredHealthCount_ = 0U;
         trialClockStarted_ = false;
         healthEvaluated_ = false;
@@ -516,10 +528,11 @@ public:
                 TClock& clock,
                 ActivatePolicies& activatePolicies,
                 HealthChecks& health,
+                ComponentHandlerDirectory<TCapacityProfile>& handlers,
                 std::uint64_t trialTimeoutNanoseconds,
                 std::uint64_t healthReevaluationNanoseconds = 0U) noexcept
         : control_(control), states_(states), boot_(boot), trial_(trial), restart_(restart), clock_(clock),
-          activatePolicies_(activatePolicies), health_(health), trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
+          activatePolicies_(activatePolicies), health_(health), handlers_(handlers), trialTimeoutNanoseconds_(trialTimeoutNanoseconds),
           healthReevaluationNanoseconds_(healthReevaluationNanoseconds) {}
 
     Result Initialize() noexcept {
@@ -595,17 +608,59 @@ public:
         OTAControlRecord<TCapacityProfile> record;
         const auto loaded = control_.Load(record);
         if (loaded != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(loaded);
-        if (!record.HasActiveTransaction) return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::NoActiveTransaction);
+        if (!record.HasActiveTransaction) {
+            return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::NoActiveTransaction);
+        }
         const ManifestIdentifier identifier{manifest.Identifier};
         if (identifier != record.Active.Manifest || manifest.Release != record.Active.Release.Value() ||
             manifest.SecurityGeneration != record.Active.CandidateSecurity.Value()) {
             return CoordinatorDetail::CoreResult(OutcomeClass::Invalid, CoordinatorCoreReason::VerifiedManifestMismatch);
         }
+
+        UpdatePlan<TCapacityProfile> candidatePlan;
+        const auto planStatus = BuildUpdatePlan(manifest, handlers_, candidatePlan);
+        if (planStatus != UpdatePlanStatus::Success) {
+            OutcomeClass outcome = OutcomeClass::Invalid;
+            if (planStatus == UpdatePlanStatus::HandlerUnavailable) outcome = OutcomeClass::Unsupported;
+            if (planStatus == UpdatePlanStatus::HandlerDirectoryNotFrozen) outcome = OutcomeClass::Unavailable;
+            if (planStatus == UpdatePlanStatus::CapacityUnavailable) outcome = OutcomeClass::CapacityUnavailable;
+            return {outcome, {DiagnosticDomain::Component, static_cast<std::uint32_t>(planStatus), 0, {}, 0U}};
+        }
+
+        for (const auto rawCondition : manifest.RequiredHealthConditions) {
+            if (health_.Find(HealthConditionTypeId{rawCondition}) == nullptr) {
+                return CoordinatorDetail::CoreResult(
+                    OutcomeClass::Unsupported, CoordinatorCoreReason::RequiredHealthUnavailable);
+            }
+        }
+
+        if (record.Active.Point == RecoveryPoint::TransactionCreated) {
+            const auto accepted = control_.AdvanceRecoveryPoint(
+                record.Active.Transaction, RecoveryPoint::ManifestAccepted);
+            if (accepted != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(accepted);
+            if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
+        } else if (record.Active.Point < RecoveryPoint::ManifestAccepted) {
+            return CoordinatorDetail::CoreResult(
+                OutcomeClass::Invalid, CoordinatorCoreReason::InvalidLifecycleTransition);
+        }
+
         requiredHealthCount_ = manifest.RequiredHealthConditions.size();
-        for (std::size_t i = 0U; i < requiredHealthCount_; ++i) requiredHealth_[i] = HealthConditionTypeId{manifest.RequiredHealthConditions[i]};
+        for (std::size_t i = 0U; i < requiredHealthCount_; ++i) {
+            requiredHealth_[i] = HealthConditionTypeId{manifest.RequiredHealthConditions[i]};
+        }
+        plan_ = candidatePlan;
+        verifiedManifest_ = &manifest;
         boundManifest_ = identifier;
         verifiedManifestBound_ = true;
         status_.VerifiedManifestBound = true;
+        status_.UpdatePlanReady = true;
+        const bool executingCandidate = record.Active.Point >= RecoveryPoint::TrialBootEntered;
+        if (!PublishActive(record, CoordinatorDetail::LifecycleForRecoveryPoint(record.Active.Point),
+                           executingCandidate)) {
+            return ProjectionFailure();
+        }
+        status_.VerifiedManifestBound = true;
+        status_.UpdatePlanReady = true;
         return Result::Success();
     }
 
@@ -629,6 +684,9 @@ public:
         if (begun != OTADurableStatus::Success) return CoordinatorDetail::DurableResult(begun);
         if (control_.Load(record) != OTADurableStatus::Success) return RecoveryRequired(&record);
         verifiedManifestBound_ = false;
+        verifiedManifest_ = nullptr;
+        plan_ = {};
+        status_.UpdatePlanReady = false;
         requiredHealthCount_ = 0U;
         trialClockStarted_ = false;
         healthEvaluated_ = false;

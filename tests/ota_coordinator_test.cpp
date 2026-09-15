@@ -9,9 +9,34 @@
 using namespace ESPressio;
 using namespace ESPressio::OTA;
 
+struct CoordinatorTestComponent {};
+
+namespace ESPressio::OTA {
+template<>
+struct ComponentTypeTraits<::CoordinatorTestComponent> {
+    static constexpr ComponentTypeDescriptor Describe() noexcept {
+        return {
+            ComponentTypeId{0x4553504F54414301ULL},
+            "ota.test.application",
+            ComponentKind::ApplicationFirmware,
+            ComponentMultiplicity::Single,
+            1U
+        };
+    }
+};
+} // namespace ESPressio::OTA
+
 namespace {
 
 using Capacity = ConstrainedV1CapacityProfile;
+
+class CoordinatorTestHandler final : public ComponentHandler<CoordinatorTestComponent, Capacity> {
+public:
+    ComponentRecoveryInspection InspectRecoveryState(
+        const ComponentPreflightContext<Capacity>&) noexcept override {
+        return {ComponentRecoveryState::NotPrepared, Result::Success()};
+    }
+};
 
 Timing::QualifiedTime CapturedTime() {
     return {123456U, Timing::TimeReliability::Synchronized};
@@ -231,6 +256,8 @@ struct Fixture final {
     ActivatePolicies Policies{};
     MutableActivatePolicy ActivatePolicy{};
     HealthRegistryType Health{};
+    CoordinatorTestHandler ComponentHandler{};
+    ComponentHandlerDirectory<Capacity> Handlers{};
     HealthCheckSet<ApplicationReadyHealthCondition, 1U> ApplicationReadyChecks{};
     PassingApplicationReady ApplicationReady{};
     HealthConditionEvaluator<ApplicationReadyHealthCondition, 1U> ApplicationReadyEvaluator{ApplicationReadyChecks};
@@ -242,6 +269,8 @@ struct Fixture final {
         if (StateRuntime.Initialize(Directory.View(), &CapturedTime) != State::StateRuntimeStatus::Success) return false;
         if (StateRuntime.Start() != State::StateRuntimeStatus::Success) return false;
         if (Policies.Add(ActivatePolicy) != PolicyGateRegistrationStatus::Success) return false;
+        if (Handlers.Register(ComponentHandler) != ComponentHandlerDirectoryStatus::Success) return false;
+        Handlers.Freeze();
         if (ApplicationReadyChecks.Add(ApplicationReady) != HealthCheckRegistrationStatus::Success) return false;
         if (Health.Add(ApplicationReadyEvaluator) != HealthRegistryStatus::Success) return false;
         return true;
@@ -249,8 +278,7 @@ struct Fixture final {
 };
 
 [[maybe_unused]] bool AdvanceToStaged(OTAControlStore<Capacity>& control, UpdateTransactionId transaction) {
-    return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ManifestAccepted) == OTADurableStatus::Success &&
-           control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&
+    return control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsAcquired) == OTADurableStatus::Success &&
            control.AdvanceRecoveryPoint(transaction, RecoveryPoint::ArtifactsVerified) == OTADurableStatus::Success &&
            control.AdvanceRecoveryPoint(transaction, RecoveryPoint::StagingStarted) == OTADurableStatus::Success &&
            control.AdvanceRecoveryPoint(transaction, RecoveryPoint::Staged) == OTADurableStatus::Success;
@@ -271,7 +299,7 @@ int main() {
         if (!fixture.InitializeState()) return 2;
         if (fixture.Control.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 3;
         TestCoordinator coordinator{fixture.Control, fixture.Owners, fixture.Boot, fixture.Trial, fixture.Restart,
-                                    fixture.Clock, fixture.Policies, fixture.Health, 5'000'000'000ULL, 100'000'000ULL};
+                                    fixture.Clock, fixture.Policies, fixture.Health, fixture.Handlers, 5'000'000'000ULL, 100'000'000ULL};
         if (!coordinator.Initialize()) return 4;
         if (coordinator.Status().Availability != CoordinatorAvailability::Ready) return 5;
 
@@ -304,7 +332,7 @@ int main() {
         if (!fixture.InitializeState()) return 20;
         if (fixture.Control.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 21;
         TestCoordinator coordinator{fixture.Control, fixture.Owners, fixture.Boot, fixture.Trial, fixture.Restart,
-                                    fixture.Clock, fixture.Policies, fixture.Health, 5'000'000'000ULL, 100'000'000ULL};
+                                    fixture.Clock, fixture.Policies, fixture.Health, fixture.Handlers, 5'000'000'000ULL, 100'000'000ULL};
         if (!coordinator.Initialize()) return 22;
 
         const auto manifest = CandidateManifest(20U, 20U, 2U);
@@ -312,6 +340,11 @@ int main() {
         UpdateTransactionId transaction;
         if (!coordinator.Start({ReleaseIdentifier{20U}, ManifestIdentifier{Id(20U)}, SecurityGeneration{2U}}, transaction)) return 24;
         if (!coordinator.BindVerifiedManifest(manifest)) return 25;
+        OTAControlRecord<Capacity> acceptedManifest;
+        if (fixture.Control.Load(acceptedManifest) != OTADurableStatus::Success ||
+            acceptedManifest.Active.Point != RecoveryPoint::ManifestAccepted ||
+            !coordinator.Status().UpdatePlanReady ||
+            coordinator.Status().Lifecycle != UpdateLifecycle::CandidateSelected) return 250;
         if (!AdvanceToStaged(fixture.Control, transaction)) return 26;
         if (coordinator.Advance().Outcome != OutcomeClass::Pending || coordinator.Status().Lifecycle != UpdateLifecycle::Staged) return 27;
 
@@ -359,7 +392,7 @@ int main() {
         if (!fixture.InitializeState()) return 50;
         if (fixture.Control.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 51;
         TestCoordinator coordinator{fixture.Control, fixture.Owners, fixture.Boot, fixture.Trial, fixture.Restart,
-                                    fixture.Clock, fixture.Policies, fixture.Health, 1'000'000'000ULL};
+                                    fixture.Clock, fixture.Policies, fixture.Health, fixture.Handlers, 1'000'000'000ULL};
         if (!coordinator.Initialize()) return 52;
         const auto manifest = CandidateManifest(30U, 30U, 1U, false);
         UpdateTransactionId transaction;
