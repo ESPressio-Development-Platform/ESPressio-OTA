@@ -91,5 +91,13 @@ jobs:
         run: ./build/tests/espressio_ota_memory_accounting_test
       - name: Temporary platform recovery diagnostic
         run: ./build/tests/espressio_ota_coordinator_platform_recovery_diagnostic
+      - name: Temporary platform recovery exit-code probe
+        shell: bash
+        run: |
+          set +e
+          ./build/tests/espressio_ota_coordinator_platform_recovery_test
+          code=$?
+          echo "platform recovery test exit code: ${code}"
+          exit 0
       - name: Test
         run: ctest --test-dir build --output-on-failure
