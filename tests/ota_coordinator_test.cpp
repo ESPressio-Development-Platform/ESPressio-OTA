@@ -235,6 +235,10 @@ struct Fixture final {
     PassingApplicationReady ApplicationReady{};
     HealthConditionEvaluator<ApplicationReadyHealthCondition, 1U> ApplicationReadyEvaluator{ApplicationReadyChecks};
 
+    ~Fixture() {
+        (void)StateRuntime.Shutdown();
+    }
+
     bool InitializeState() {
         if (RegisterOTAStateTypes(Directory) != Primitive::TypeDirectoryRegistrationStatus::Success) return false;
         if (Directory.Initialize() != Primitive::TypeDirectoryInitializationStatus::Success) return false;
