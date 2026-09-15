@@ -165,14 +165,19 @@ public:
     void Close() noexcept override { ++CloseCalls; }
 };
 
-class FakeArtifactStore final : public IArtifactStore {
+class FakeArtifactStore final : public IReadableArtifactStore {
 public:
     std::array<std::uint8_t, 64> Bytes{};
+    ArtifactIdentifier StoredId{};
+    ArtifactIdentifier WorkingId{};
     std::size_t Size{0U};
+    std::size_t ReadPosition{0U};
     std::size_t WriteLimit{1U};
     std::size_t BeginCalls{0U};
     std::size_t FinalizeCalls{0U};
     std::size_t AbortCalls{0U};
+    std::size_t OpenReadCalls{0U};
+    std::size_t CloseReadCalls{0U};
     bool PendingWriteOnce{false};
     bool PendingWriteReturned{false};
     bool PendingFinalizeOnce{false};
@@ -181,6 +186,7 @@ public:
     Result BeginWrite(const ArtifactStoreOpenRequest& request) noexcept override {
         ++BeginCalls;
         Size = 0U;
+        WorkingId = request.Identifier;
         PendingWriteReturned = false;
         PendingFinalizeReturned = false;
         return request.IsValid() ? Result::Success()
@@ -207,6 +213,7 @@ public:
             PendingFinalizeReturned = true;
             return {ArtifactStoreFinalizeStatus::Pending, {OutcomeClass::Pending, {}}};
         }
+        StoredId = WorkingId;
         return {ArtifactStoreFinalizeStatus::Stored, Result::Success()};
     }
 
@@ -215,6 +222,65 @@ public:
     Result QueryAvailableBytes(std::uint64_t& availableBytes) const noexcept override {
         availableBytes = Bytes.size() - Size;
         return Result::Success();
+    }
+
+    Result OpenRead(const ArtifactStoreReadRequest& request) noexcept override {
+        ++OpenReadCalls;
+        if (!request.IsValid() || request.Identifier != StoredId || request.ExpectedLength != Size) {
+            return {OutcomeClass::VerificationFailed, {DiagnosticDomain::Store, 3U}};
+        }
+        ReadPosition = 0U;
+        return Result::Success();
+    }
+
+    StreamReadResult ReadStored(std::uint8_t* output, std::size_t capacity) noexcept override {
+        if (output == nullptr || capacity == 0U) {
+            return StreamReadResult::Failed({OutcomeClass::Invalid, {DiagnosticDomain::Store, 4U}});
+        }
+        if (ReadPosition == Size) return StreamReadResult::End();
+        const auto count = std::min<std::size_t>(2U, std::min(capacity, Size - ReadPosition));
+        for (std::size_t i = 0U; i < count; ++i) output[i] = Bytes[ReadPosition + i];
+        ReadPosition += count;
+        return StreamReadResult::Data(count);
+    }
+
+    void CloseRead() noexcept override { ++CloseReadCalls; }
+};
+
+class FakeDigestVerifier final : public Security::IStreamingDigestVerifier {
+public:
+    std::size_t BeginCalls{0U};
+    std::size_t UpdateCalls{0U};
+    std::size_t FinalCalls{0U};
+    std::size_t Bytes{0U};
+    bool FailFinal{false};
+
+    bool Supports(Security::DigestAlgorithmIdentifier algorithm) const noexcept override {
+        return algorithm == Security::DigestAlgorithm::SHA256;
+    }
+    std::size_t DigestSize(Security::DigestAlgorithmIdentifier algorithm) const noexcept override {
+        return Supports(algorithm) ? 32U : 0U;
+    }
+    Security::VerificationResult Begin(Security::DigestAlgorithmIdentifier algorithm) noexcept override {
+        ++BeginCalls;
+        Bytes = 0U;
+        return Supports(algorithm)
+            ? Security::VerificationResult::Ok()
+            : Security::VerificationResult{Security::VerificationStatus::UnsupportedAlgorithm, 0};
+    }
+    Security::VerificationResult Update(Security::ByteView bytes) noexcept override {
+        ++UpdateCalls;
+        if (!bytes.IsValid()) return {Security::VerificationStatus::InvalidArgument, 0};
+        Bytes += bytes.Size;
+        return Security::VerificationResult::Ok();
+    }
+    Security::VerificationResult VerifyFinal(Security::ByteView expectedDigest) noexcept override {
+        ++FinalCalls;
+        if (!expectedDigest.IsValid() || expectedDigest.Size != 32U) {
+            return {Security::VerificationStatus::InvalidArgument, 0};
+        }
+        if (FailFinal) return {Security::VerificationStatus::DigestMismatch, 0};
+        return Security::VerificationResult::Ok();
     }
 };
 
@@ -365,6 +431,7 @@ struct Fixture final {
     ComponentHandlerDirectory<Capacity> Handlers{};
     FakeArtifactSource Source{};
     FakeArtifactStore ArtifactStore{};
+    FakeDigestVerifier Digest{};
     HealthCheckSet<ApplicationReadyHealthCondition, 1U> ApplicationReadyChecks{};
     PassingApplicationReady ApplicationReady{};
     HealthConditionEvaluator<ApplicationReadyHealthCondition, 1U> ApplicationReadyEvaluator{ApplicationReadyChecks};
@@ -385,7 +452,7 @@ struct Fixture final {
 
     TestCoordinator MakeCoordinator(std::uint64_t timeout, std::uint64_t reevaluation = 0U) {
         return TestCoordinator{Control, Owners, Boot, Trial, Restart, Clock, Policies, Health, Handlers,
-                               Source, ArtifactStore, Checkpoints, Workspace, timeout, reevaluation};
+                               Source, ArtifactStore, Checkpoints, Workspace, Digest, timeout, reevaluation};
     }
 };
 
@@ -579,11 +646,27 @@ int main() {
         if (fixture.Checkpoints.Find(transaction, ArtifactIdentifier{Id(41U)}, checkpoint, checkpointSlot) !=
             OTADurableStatus::NotFound) return 82;
 
+        bool verified = false;
+        for (std::size_t step = 0U; step < 64U; ++step) {
+            const auto result = coordinator.Advance();
+            if (result.Outcome != OutcomeClass::Pending && result.Outcome != OutcomeClass::Deferred) return 83;
+            OTAControlRecord<Capacity> record;
+            if (fixture.Control.Load(record) != OTADurableStatus::Success) return 84;
+            if (record.Active.Point == RecoveryPoint::ArtifactsVerified) {
+                verified = true;
+                break;
+            }
+        }
+        if (!verified || coordinator.Status().Lifecycle != UpdateLifecycle::Preparing) return 85;
+        if (fixture.ArtifactStore.OpenReadCalls != 1U || fixture.ArtifactStore.CloseReadCalls != 1U ||
+            fixture.Digest.BeginCalls != 1U || fixture.Digest.UpdateCalls == 0U ||
+            fixture.Digest.FinalCalls != 1U || fixture.Digest.Bytes != fixture.Source.Size) return 86;
+
         const auto frontier = coordinator.Advance();
         if (frontier.Outcome != OutcomeClass::Pending ||
             frontier.Detail.Reason != static_cast<std::uint32_t>(CoordinatorCoreReason::AwaitingExecutionIntegration) ||
-            coordinator.Status().Lifecycle != UpdateLifecycle::Verifying) return 83;
-        if (!coordinator.Cancel(transaction) || coordinator.Status().Availability != CoordinatorAvailability::Ready) return 84;
+            coordinator.Status().Lifecycle != UpdateLifecycle::Preparing) return 87;
+        if (!coordinator.Cancel(transaction) || coordinator.Status().Availability != CoordinatorAvailability::Ready) return 88;
     }
 
 #else
