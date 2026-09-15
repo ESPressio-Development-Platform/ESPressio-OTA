@@ -490,6 +490,22 @@ public:
         return Commit(record);
     }
 
+    OTADurableStatus AbandonTransaction(UpdateTransactionId transaction) noexcept {
+        if (!transaction) return OTADurableStatus::Invalid;
+        const auto ready = MutationReady();
+        if (ready != OTADurableStatus::Success) return ready;
+        OTAControlRecord<TCapacityProfile> record;
+        auto status = ReadCommitted(record);
+        if (status != OTADurableStatus::Success) return status;
+        if (!record.HasActiveTransaction) return OTADurableStatus::NoActiveTransaction;
+        if (record.Active.Transaction != transaction) return OTADurableStatus::TransactionMismatch;
+        if (record.Intent != DurableIntent::None || record.Active.Point >= RecoveryPoint::ActivationSelected) {
+            return OTADurableStatus::InvalidTransition;
+        }
+        ClearActive(record);
+        return Commit(record);
+    }
+
     OTADurableStatus ArmActivation(
     UpdateTransactionId transaction,
     Platform::OTA::BootTargetIdentifier candidateBootTarget,

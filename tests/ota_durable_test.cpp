@@ -134,6 +134,23 @@ ArtifactCheckpoint<Capacity> Checkpoint(UpdateTransactionId transaction, std::ui
 int main() {
     static_assert(OTAControlEncodedBytesV1 <= Capacity::MaximumOTAControlRecordBytes);
 
+    {
+        FakeAtomicRecordStore cancellationStore;
+        OTAControlStore<Capacity> cancellationControl{cancellationStore};
+        if (cancellationControl.ProvisionBaseline(FactoryBaseline(), SecurityGeneration{0U}) != OTADurableStatus::Success) return 100;
+        ActiveTransactionRecord cancelled;
+        if (cancellationControl.BeginTransaction(ReleaseIdentifier{7U}, ManifestIdentifier{Id(7U)}, SecurityGeneration{0U}, cancelled) != OTADurableStatus::Success) return 101;
+        if (cancellationControl.AbandonTransaction(cancelled.Transaction) != OTADurableStatus::Success) return 102;
+        OTAControlRecord<Capacity> cancellationLoaded;
+        if (cancellationControl.Load(cancellationLoaded) != OTADurableStatus::Success || cancellationLoaded.HasActiveTransaction) return 103;
+        ActiveTransactionRecord replacement;
+        if (cancellationControl.BeginTransaction(ReleaseIdentifier{8U}, ManifestIdentifier{Id(8U)}, SecurityGeneration{0U}, replacement) != OTADurableStatus::Success) return 104;
+        if (replacement.Transaction != UpdateTransactionId{2U} || replacement.CandidateGeneration != UpdateGenerationId{3U}) return 105;
+        if (cancellationControl.AdvanceRecoveryPoint(replacement.Transaction, RecoveryPoint::Staged) != OTADurableStatus::Success) return 106;
+        if (cancellationControl.ArmActivation(replacement.Transaction, ESPressio::Platform::OTA::BootTargetIdentifier{2U}, ESPressio::Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 107;
+        if (cancellationControl.AbandonTransaction(replacement.Transaction) != OTADurableStatus::InvalidTransition) return 108;
+    }
+
     FakeAtomicRecordStore store;
     OTAControlStore<Capacity> control{store};
 
