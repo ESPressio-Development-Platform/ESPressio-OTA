@@ -89,13 +89,5 @@ jobs:
         run: ./build/tests/espressio_ota_offer_test
       - name: OTA retained-memory accounting report
         run: ./build/tests/espressio_ota_memory_accounting_test
-      - name: Diagnose activation recovery test
-        shell: bash
-        run: |
-          set +e
-          ./build/tests/espressio_ota_coordinator_platform_activation_recovery_test
-          code=$?
-          echo "activation-recovery-exit=$code"
-          exit 0
       - name: Test
         run: ctest --test-dir build --output-on-failure
