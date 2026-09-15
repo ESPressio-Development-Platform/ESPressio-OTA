@@ -329,18 +329,27 @@ The native suite covers bounded schemas, canonical Manifest encoding, providers/
 
 Artifact-flow coverage includes short/truncated and overrun streams, cooperative Pending behavior, source-attempt failure, private-prefix resume, checkpoint lag behind retained bytes, cross-provider resume, forced restart-from-zero for a non-offset replacement Source, digest failure and committed-store collision behavior. Coordinator-specific source-selection tests separately exercise successful explicit failover and finite retry exhaustion.
 
-The ESP32 implementation line is separately built against real ESP32 toolchains. The P10 demo workflow currently validates four compile gates:
+The ESP32 implementation line is separately built against real ESP32 toolchains. The P10 demo workflow validates nine compile/configuration gates:
 
 ```text
 ESP32 Arduino PlatformIO provider-readiness demo
 pure ESP-IDF PlatformIO provider-readiness demo
-exact ESP32 Arduino IDE sketch source
+exact ESP32 Arduino IDE provider-readiness sketch source
 exact ESP-IDF-provider Arduino IDE sketch source
+ESP32 physical-validation PlatformIO harness
+exact ESP32 physical-validation Arduino IDE sketch source
+ESP32 Coordinator-recovery PlatformIO harness
+exact ESP32 Coordinator-recovery Arduino IDE sketch source
+rollback-enabled Arduino-as-ESP-IDF-component Coordinator-recovery bootloader harness
 ```
+
+The rollback-enabled gate rebuilds the bootloader and asserts the effective generated configuration required by the physical recovery laboratory, including Arduino autostart, ESP-IDF application rollback support, 1 kHz FreeRTOS tick rate, 4 MiB flash and C++ exceptions. It also requires a non-empty rollback-environment `bootloader.bin`.
 
 The pure ESP-IDF readiness demo deliberately includes only the OTA capacity contract and the portable/concrete Platform OTA provider surface it exercises. It does not pull the full Coordinator/State/Timing dependency graph merely to test Platform provider readiness, and it does not use an Arduino compatibility shim.
 
 Physical-device validation remains a distinct release-readiness activity: a successful host or cross-compile is not represented as proof that power-cut/reboot behaviour has been exercised on physical hardware.
+
+The exact software-complete anchor, green workflow runs, dependency SHAs and remaining physical-validation boundary are recorded in `OTA_V1_IMPLEMENTATION_READINESS.md`.
 
 ## CMake development build
 
