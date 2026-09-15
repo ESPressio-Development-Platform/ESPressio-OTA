@@ -77,12 +77,5 @@ jobs:
         run: cmake --build build --parallel
       - name: OTA constrained object footprint report
         run: ./build/tests/espressio_ota_offer_test
-      - name: Coordinator diagnostic
-        run: |
-          set +e
-          ./build/tests/espressio_ota_coordinator_test
-          code=$?
-          echo "coordinator-exit=$code"
-          exit $code
       - name: Test
         run: ctest --test-dir build --output-on-failure
