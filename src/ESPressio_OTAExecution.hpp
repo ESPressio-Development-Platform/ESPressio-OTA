@@ -292,15 +292,23 @@ class ComponentStagingSession final {
     std::size_t componentIndex_{0U};
     ComponentStagingPhase phase_{ComponentStagingPhase::Idle};
     bool active_{false};
+    bool artifactsBound_{false};
+
+    void ReleaseArtifactBindings() noexcept {
+        for (auto& reader : readers_) lease_.Close(&reader);
+        artifacts_ = {};
+        artifactsBound_ = false;
+    }
 
     Result Fail(Result result) noexcept {
+        ReleaseArtifactBindings();
         active_ = false;
         phase_ = ComponentStagingPhase::Failed;
         return result;
     }
 
     Result BuildArtifacts(const UpdatePlanEntry<TCapacityProfile>& entry) noexcept {
-        artifacts_ = {};
+        ReleaseArtifactBindings();
         if (entry.ManifestComponentEntry == nullptr || manifest_ == nullptr) {
             return ComponentExecutionDetail::Failure(
                 OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration);
@@ -322,6 +330,7 @@ class ComponentStagingSession final {
             const auto added = artifacts_.Add(readers_[i]);
             if (!added) return added;
         }
+        artifactsBound_ = true;
         return Result::Success();
     }
 
@@ -380,6 +389,7 @@ public:
             return ComponentExecutionDetail::Failure(
                 OutcomeClass::Invalid, ComponentExecutionReason::InvalidConfiguration);
         }
+        ReleaseArtifactBindings();
         manifest_ = &manifest;
         plan_ = &plan;
         targetProfile_ = &targetProfile;
@@ -463,19 +473,24 @@ public:
         }
 
         if (phase_ == ComponentStagingPhase::Staging) {
-            const auto bindings = BuildArtifacts(*entry);
-            if (!bindings) return Fail(bindings);
+            if (!artifactsBound_) {
+                const auto bindings = BuildArtifacts(*entry);
+                if (!bindings) return Fail(bindings);
+            }
             ComponentExecutionContext<TCapacityProfile> context{preflight, &artifacts_};
             const auto action = entry->Handler->Stage(context);
             return ObserveAction(action, ComponentStagingPhase::Finalizing);
         }
 
         if (phase_ == ComponentStagingPhase::Finalizing) {
-            const auto bindings = BuildArtifacts(*entry);
-            if (!bindings) return Fail(bindings);
+            if (!artifactsBound_) {
+                return Fail(ComponentExecutionDetail::Failure(
+                    OutcomeClass::Invalid, ComponentExecutionReason::ArtifactBindingFailed));
+            }
             ComponentExecutionContext<TCapacityProfile> context{preflight, &artifacts_};
             const auto action = entry->Handler->FinalizeStage(context);
             if (action.Status == ComponentActionStatus::Complete && action.Detail) {
+                ReleaseArtifactBindings();
                 ++componentIndex_;
                 if (componentIndex_ == plan_->Size()) {
                     active_ = false;
