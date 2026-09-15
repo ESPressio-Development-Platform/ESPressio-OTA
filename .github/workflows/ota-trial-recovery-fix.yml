@@ -23,167 +23,127 @@ jobs:
           p = Path('src/ESPressio_OTACoordinator.hpp')
           s = p.read_text()
 
-          marker = '''    ArtifactSourceRetryExhausted
-          };
-          '''
-          replacement = '''    ArtifactSourceRetryExhausted,
-              CandidateTrialRejected
-          };
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
+          if 'CandidateTrialRejected' not in s:
+              anchor = '    ArtifactSourceRetryExhausted\n};'
+              if anchor not in s: raise RuntimeError('reason anchor missing')
+              s = s.replace(anchor, '    ArtifactSourceRetryExhausted,\n    CandidateTrialRejected\n};', 1)
 
-          marker = '''    bool activationRestartIssued_{false};
-              bool rollbackRestartIssued_{false};
-          '''
-          replacement = '''    bool activationRestartIssued_{false};
-              bool rollbackRestartIssued_{false};
-              bool activationRecovered_{false};
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
+          if 'bool activationRecovered_' not in s:
+              anchor = '    bool rollbackRestartIssued_{false};\n'
+              if anchor not in s: raise RuntimeError('member anchor missing')
+              s = s.replace(anchor, anchor + '    bool activationRecovered_{false};\n', 1)
 
-          marker = '''        activationRestartIssued_ = false;
-              rollbackRestartIssued_ = false;
-              verifiedManifestBound_ = false;
-          '''
-          replacement = '''        activationRestartIssued_ = false;
-              rollbackRestartIssued_ = false;
+          clear_anchor = '        rollbackRestartIssued_ = false;\n        verifiedManifestBound_ = false;'
+          if clear_anchor in s:
+              s = s.replace(clear_anchor,
+                  '        rollbackRestartIssued_ = false;\n        activationRecovered_ = false;\n        verifiedManifestBound_ = false;', 1)
+
+          init_old = '''            } else if (current != record.Active.PreviousCommittedBootTarget) {
+              return RecoveryRequired(&record);
+          }
+              lifecycle = UpdateLifecycle::Activating;'''
+          init_new = '''            } else if (current == record.Active.PreviousCommittedBootTarget) {
+              activationRecovered_ = true;
+          } else {
+              return RecoveryRequired(&record);
+          }
+              lifecycle = UpdateLifecycle::Activating;'''
+          if init_old in s:
+              s = s.replace(init_old, init_new, 1)
+          elif 'activationRecovered_ = true;' not in s:
+              raise RuntimeError('Initialize activation anchor missing')
+
+          begin_old = '''        componentLifecycle_.Reset();
+              activationRestartIssued_ = false;
+              if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'''
+          begin_new = '''        componentLifecycle_.Reset();
+              activationRestartIssued_ = false;
               activationRecovered_ = false;
-              verifiedManifestBound_ = false;
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
+              if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();'''
+          if begin_old in s:
+              s = s.replace(begin_old, begin_new, 1)
 
-          old = '''        if (record.Intent == DurableIntent::ActivationArmed) {
-                  if (current == record.Active.CandidateBootTarget) {
-                      if (!trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
-                      executingCandidate = true;
-                  } else if (current != record.Active.PreviousCommittedBootTarget) {
+          advance_anchor = '''        if (record.Intent == DurableIntent::ActivationArmed) {
+              const auto componentStep = AdvanceComponentLifecycle(
+                  record, ComponentLifecycleOperation::Activate);'''
+          advance_new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
+              if (activationRecovered_) {
+                  if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {
                       return RecoveryRequired(&record);
-                  }
-                  lifecycle = UpdateLifecycle::Activating;
-          '''
-          new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
-                  if (current == record.Active.CandidateBootTarget) {
-                      if (!trial_.IsCurrentBootTrial()) return RecoveryRequired(&record);
-                      executingCandidate = true;
-                  } else if (current == record.Active.PreviousCommittedBootTarget) {
-                      activationRecovered_ = true;
                   } else {
-                      return RecoveryRequired(&record);
-                  }
-                  lifecycle = UpdateLifecycle::Activating;
-          '''
-          assert s.count(old) == 1
-          s = s.replace(old, new, 1)
-
-          marker = '''        componentLifecycle_.Reset();
-              activationRestartIssued_ = false;
-              if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();
-          '''
-          replacement = '''        componentLifecycle_.Reset();
-              activationRestartIssued_ = false;
-              activationRecovered_ = false;
-              if (!PublishActive(record, UpdateLifecycle::Activating, false)) return ProjectionFailure();
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
-
-          old = '''        if (record.Intent == DurableIntent::ActivationArmed) {
-                  const auto componentStep = AdvanceComponentLifecycle(
-                      record, ComponentLifecycleOperation::Activate);
-          '''
-          new = '''        if (record.Intent == DurableIntent::ActivationArmed) {
-                  if (activationRecovered_) {
-                      if constexpr (!Platform::OTA::HasTrialBootStateInspectionV<TTrialBoot>) {
-                          return RecoveryRequired(&record);
-                      } else {
-                          const auto inspected = trial_.InspectBootTargetTrialState(
-                              record.Active.CandidateBootTarget);
-                          if (!inspected) return RecoveryRequired(&record);
-                          switch (inspected.State) {
-                              case Platform::OTA::TrialBootState::NeverAttempted:
-                              case Platform::OTA::TrialBootState::Armed:
-                                  activationRecovered_ = false;
-                                  break;
-                              case Platform::OTA::TrialBootState::Rejected:
-                                  activationRecovered_ = false;
-                                  return StartRollback(record, CoordinatorDetail::CoreResult(
-                                      OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));
-                              case Platform::OTA::TrialBootState::Unknown:
-                              case Platform::OTA::TrialBootState::Untracked:
-                              case Platform::OTA::TrialBootState::PendingValidation:
-                              case Platform::OTA::TrialBootState::Accepted:
-                                  return RecoveryRequired(&record);
-                          }
+                      const auto inspected = trial_.InspectBootTargetTrialState(
+                          record.Active.CandidateBootTarget);
+                      if (!inspected) return RecoveryRequired(&record);
+                      switch (inspected.State) {
+                          case Platform::OTA::TrialBootState::NeverAttempted:
+                          case Platform::OTA::TrialBootState::Armed:
+                              activationRecovered_ = false;
+                              break;
+                          case Platform::OTA::TrialBootState::Rejected:
+                              activationRecovered_ = false;
+                              return StartRollback(record, CoordinatorDetail::CoreResult(
+                                  OutcomeClass::Failed, CoordinatorCoreReason::CandidateTrialRejected));
+                          case Platform::OTA::TrialBootState::Unknown:
+                          case Platform::OTA::TrialBootState::Untracked:
+                          case Platform::OTA::TrialBootState::PendingValidation:
+                          case Platform::OTA::TrialBootState::Accepted:
+                              return RecoveryRequired(&record);
                       }
                   }
+              }
 
-                  const auto componentStep = AdvanceComponentLifecycle(
-                      record, ComponentLifecycleOperation::Activate);
-          '''
-          assert s.count(old) == 1
-          s = s.replace(old, new, 1)
+              const auto componentStep = AdvanceComponentLifecycle(
+                  record, ComponentLifecycleOperation::Activate);'''
+          if advance_anchor in s:
+              s = s.replace(advance_anchor, advance_new, 1)
+          elif 'InspectBootTargetTrialState' not in s:
+              raise RuntimeError('Advance activation anchor missing')
 
-          old = '''            if (current == record.Active.PreviousCommittedBootTarget) {
-                      if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {
-          '''
-          new = '''            if (current == record.Active.PreviousCommittedBootTarget) {
-                      if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
-                          const auto selected = CoordinatorDetail::PlatformResult(
-                              boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
-                          if (selected.Outcome != OutcomeClass::Success) return selected;
-                          if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
-                          return {OutcomeClass::Pending, {}};
-                      }
-                      if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {
-          '''
-          assert s.count(old) == 1
-          s = s.replace(old, new, 1)
+          rollback_anchor = '''            if (current == record.Active.PreviousCommittedBootTarget) {
+                  if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
+          rollback_new = '''            if (current == record.Active.PreviousCommittedBootTarget) {
+                  if (boot_.NextBootTarget() != record.Active.PreviousCommittedBootTarget) {
+                      const auto selected = CoordinatorDetail::PlatformResult(
+                          boot_.SelectNextBootTarget(record.Active.PreviousCommittedBootTarget));
+                      if (selected.Outcome != OutcomeClass::Success) return selected;
+                      if (!PublishActive(record, UpdateLifecycle::RollingBack, false, true)) return ProjectionFailure();
+                      return {OutcomeClass::Pending, {}};
+                  }
+                  if (componentLifecycle_.RestartRequired() && !rollbackRestartIssued_) {'''
+          if rollback_anchor in s:
+              s = s.replace(rollback_anchor, rollback_new, 1)
+          elif 'const auto selected = CoordinatorDetail::PlatformResult' not in s:
+              raise RuntimeError('rollback normalization anchor missing')
           p.write_text(s)
 
           p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
           s = p.read_text()
-          marker = '''    bool Trial{false};
-              Platform::OTA::Status MarkValidStatus{Platform::OTA::Status::Success};
-          '''
-          replacement = '''    bool Trial{false};
-              Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};
-              Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};
-              std::size_t InspectCalls{0U};
-              Platform::OTA::Status MarkValidStatus{Platform::OTA::Status::Success};
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
-          marker = '''    bool IsCurrentBootTrial() const noexcept { return Trial; }
-              Platform::OTA::Result MarkCurrentBootValid() noexcept {
-          '''
-          replacement = '''    bool IsCurrentBootTrial() const noexcept { return Trial; }
-              Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
+          if 'Platform::OTA::TrialBootState CandidateState' not in s:
+              anchor = '    bool Trial{false};\n'
+              if anchor not in s: raise RuntimeError('Trial field anchor missing')
+              s = s.replace(anchor, anchor +
+                  '    Platform::OTA::TrialBootState CandidateState{Platform::OTA::TrialBootState::NeverAttempted};\n'
+                  '    Platform::OTA::Status InspectStatus{Platform::OTA::Status::Success};\n'
+                  '    mutable std::size_t InspectCalls{0U};\n', 1)
+
+          if 'InspectBootTargetTrialState' not in s:
+              anchor = '    Platform::OTA::Result MarkCurrentBootValid() noexcept {'
+              method = '''    Platform::OTA::TrialBootStateResult InspectBootTargetTrialState(
                   Platform::OTA::BootTargetIdentifier target) const noexcept {
-                  auto* self = const_cast<FaultTrialBoot*>(this);
-                  ++self->InspectCalls;
+                  ++InspectCalls;
                   if (!target) return {Platform::OTA::Status::Invalid, Platform::OTA::TrialBootState::Unknown, -105};
-                  return {InspectStatus, InspectStatus == Platform::OTA::Status::Success
-                      ? CandidateState : Platform::OTA::TrialBootState::Unknown,
+                  return {InspectStatus,
+                      InspectStatus == Platform::OTA::Status::Success
+                          ? CandidateState : Platform::OTA::TrialBootState::Unknown,
                       InspectStatus == Platform::OTA::Status::Success ? 0 : -106};
               }
-              Platform::OTA::Result MarkCurrentBootValid() noexcept {
-          '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
+              '''
+              if anchor not in s: raise RuntimeError('MarkCurrentBootValid anchor missing')
+              s = s.replace(anchor, method + anchor, 1)
 
-          marker = '''        if (!LoadActive(fixture, record) || record.Active.Point != RecoveryPoint::TrialBootEntered ||
-                  record.Intent != DurableIntent::None) return 18;
-              }
-          #elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2
-          '''
-          replacement = '''        if (!LoadActive(fixture, record) || record.Active.Point != RecoveryPoint::TrialBootEntered ||
-                  record.Intent != DurableIntent::None) return 18;
-              }
-
-              // If the platform has already rejected the candidate after a Trial reset,
+          if 'recovered ActivationArmed must never re-arm it' not in s:
+              anchor = '#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2'
+              regression = '''    // If the platform has already rejected the candidate after a Trial reset,
               // recovered ActivationArmed must never re-arm it. Persist rollback instead.
               {
                   Fixture fixture;
@@ -209,8 +169,6 @@ jobs:
                   if (!LoadActive(fixture, record) || record.Intent != DurableIntent::RollbackIntent ||
                       fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U}) return 56;
 
-                  // Even if a backend reports previous as current while next still points
-                  // at candidate, rollback must normalize next before clearing durability.
                   fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{2U};
                   const auto normalize = coordinator.Advance();
                   if (normalize.Outcome != OutcomeClass::Pending ||
@@ -221,10 +179,9 @@ jobs:
                   if (fixture.Control.Load(record) != OTADurableStatus::Success || record.HasActiveTransaction ||
                       record.Committed.Generation != UpdateGenerationId{1U}) return 60;
               }
-          #elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2
           '''
-          assert s.count(marker) == 1
-          s = s.replace(marker, replacement, 1)
+              if anchor not in s: raise RuntimeError('scenario 2 anchor missing')
+              s = s.replace(anchor, regression + anchor, 1)
           p.write_text(s)
           PY
       - name: Commit fix
