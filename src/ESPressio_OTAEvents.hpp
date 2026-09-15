@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -38,6 +39,15 @@ struct OTAEventTransactionContext final
     std::uint64_t Release{0U};
     std::array<std::uint8_t, 16U> Manifest{};
 
+    constexpr OTAEventTransactionContext() noexcept = default;
+    constexpr OTAEventTransactionContext(
+        std::uint64_t transaction,
+        std::uint64_t candidateGeneration,
+        std::uint64_t release,
+        const std::array<std::uint8_t, 16U>& manifest) noexcept
+        : Transaction(transaction), CandidateGeneration(candidateGeneration),
+          Release(release), Manifest(manifest) {}
+
     constexpr bool IsValid() const noexcept {
         return Transaction != 0U && CandidateGeneration != 0U && Release != 0U &&
                bool(ManifestIdentifier{Manifest});
@@ -50,7 +60,8 @@ struct OTAEventTransactionContext final
 
     static constexpr OTAEventTransactionContext From(
         const ActiveUpdateTransactionValue& active) noexcept {
-        return {active.Transaction, active.CandidateGeneration, active.Release, active.Manifest};
+        return OTAEventTransactionContext{
+            active.Transaction, active.CandidateGeneration, active.Release, active.Manifest};
     }
 
     ESPRESSIO_SERIALIZABLE_TYPE(OTAEventTransactionContext)
