@@ -1,0 +1,121 @@
+name: Patch rejected Trial test isolation
+
+on:
+  push:
+    branches:
+      - ota_v1
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ota_v1
+          fetch-depth: 0
+      - name: Isolate rejected Trial regression
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/ota_coordinator_platform_recovery_test.cpp')
+          s = p.read_text()
+          start_marker = '    // A candidate that had entered Trial and was rejected by the bootloader\n'
+          end_marker = '#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 2\n'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+          block = s[start:end]
+          s = s[:start] + s[end:]
+
+          scenario4 = '''#elif ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO == 4
+    // A candidate that had entered Trial and was rejected by the bootloader
+    // must never be blindly re-armed from recovered ActivationArmed state.
+    // This regression has its own process because OTA State runtime setup is
+    // intentionally single-runtime for a native test process.
+    {
+        Fixture fixture;
+        if (!fixture.InitializeRuntime()) return 51;
+        ActiveTransactionRecord active;
+        if (!fixture.CreateStaged(11U, active)) return 52;
+        const auto manifest = CandidateManifest(11U);
+        if (fixture.Control.ArmActivation(
+                active.Transaction,
+                Platform::OTA::BootTargetIdentifier{2U},
+                Platform::OTA::BootTargetIdentifier{1U}) != OTADurableStatus::Success) return 53;
+        fixture.Handler.Recovery = ComponentRecoveryState::Activated;
+        fixture.Boot.Current = Platform::OTA::BootTargetIdentifier{1U};
+        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{1U};
+        fixture.Trial.CandidateState = Platform::OTA::TrialBootState::Rejected;
+
+        auto coordinator = fixture.MakeCoordinator();
+        if (!coordinator.Initialize() ||
+            !coordinator.BindVerifiedManifest(manifest, fixture.TargetProfile)) return 54;
+        const auto rejected = coordinator.Advance();
+        if (rejected.Outcome != OutcomeClass::Failed ||
+            rejected.Detail.Reason != static_cast<std::uint32_t>(CoordinatorCoreReason::CandidateTrialRejected) ||
+            fixture.Boot.SelectCalls != 0U ||
+            fixture.Trial.InspectCalls != 1U) return 55;
+
+        OTAControlRecord<Capacity> record;
+        if (!LoadActive(fixture, record) ||
+            record.Intent != DurableIntent::RollbackIntent ||
+            record.Committed.Generation != UpdateGenerationId{1U}) return 56;
+
+        // Even if next-boot somehow still names the rejected candidate,
+        // rollback must normalize it to the previous committed target
+        // before durable rollback state can be finalized.
+        fixture.Boot.Next = Platform::OTA::BootTargetIdentifier{2U};
+        const auto normalize = coordinator.Advance();
+        if (normalize.Outcome != OutcomeClass::Pending ||
+            fixture.Boot.Next != Platform::OTA::BootTargetIdentifier{1U} ||
+            fixture.Boot.SelectCalls != 1U) return 57;
+        if (!LoadActive(fixture, record) ||
+            record.Intent != DurableIntent::RollbackIntent) return 58;
+
+        if (!coordinator.Advance()) return 59;
+        if (fixture.Control.Load(record) != OTADurableStatus::Success ||
+            record.HasActiveTransaction ||
+            record.Committed.Generation != UpdateGenerationId{1U}) return 60;
+    }
+'''
+          else_marker = '#else\n#error "Unknown ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO"\n'
+          if else_marker not in s:
+              raise SystemExit('platform recovery #else marker not found')
+          s = s.replace(else_marker, scenario4 + else_marker, 1)
+          p.write_text(s)
+
+          p = Path('tests/CMakeLists.txt')
+          s = p.read_text()
+          anchor = '''add_executable(espressio_ota_coordinator_platform_rollback_recovery_test ota_coordinator_platform_recovery_test.cpp)
+target_link_libraries(espressio_ota_coordinator_platform_rollback_recovery_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_coordinator_platform_rollback_recovery_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+target_compile_definitions(espressio_ota_coordinator_platform_rollback_recovery_test PRIVATE ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO=3)
+add_test(NAME espressio_ota_coordinator_platform_rollback_recovery_test COMMAND espressio_ota_coordinator_platform_rollback_recovery_test)
+'''
+          addition = anchor + '''
+add_executable(espressio_ota_coordinator_platform_rejected_trial_recovery_test ota_coordinator_platform_recovery_test.cpp)
+target_link_libraries(espressio_ota_coordinator_platform_rejected_trial_recovery_test PRIVATE ESPressio::OTA)
+target_compile_options(espressio_ota_coordinator_platform_rejected_trial_recovery_test PRIVATE ${ESPRESSIO_OTA_NATIVE_COMPILE_OPTIONS})
+target_compile_definitions(espressio_ota_coordinator_platform_rejected_trial_recovery_test PRIVATE ESPRESSIO_OTA_PLATFORM_RECOVERY_SCENARIO=4)
+add_test(NAME espressio_ota_coordinator_platform_rejected_trial_recovery_test COMMAND espressio_ota_coordinator_platform_rejected_trial_recovery_test)
+'''
+          if s.count(anchor) != 1:
+              raise SystemExit(f'rollback CMake anchor count={s.count(anchor)}')
+          s = s.replace(anchor, addition, 1)
+          list_anchor = '    espressio_ota_coordinator_platform_rollback_recovery_test\n'
+          if s.count(list_anchor) != 1:
+              raise SystemExit(f'native target list anchor count={s.count(list_anchor)}')
+          s = s.replace(list_anchor, list_anchor + '    espressio_ota_coordinator_platform_rejected_trial_recovery_test\n', 1)
+          p.write_text(s)
+          PY
+
+          git config user.name "Simon Stuart"
+          git config user.email "lakraven@gmail.com"
+          git add tests/ota_coordinator_platform_recovery_test.cpp tests/CMakeLists.txt
+          git diff --cached --check
+          git commit -m "test: isolate rejected Trial recovery regression"
+          git push origin HEAD:ota_v1
