@@ -1,6 +1,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include "ESPressio_OTA.hpp"
 #include <ESPressio_RuntimeIdentity.hpp>
@@ -273,7 +274,17 @@ int main() {
         if (!coordinator.Start({ReleaseIdentifier{10U}, ManifestIdentifier{Id(10U)}, SecurityGeneration{1U}}, first) ||
             first != UpdateTransactionId{1U}) return 6;
         if (coordinator.Status().Lifecycle != UpdateLifecycle::Checking) return 7;
-        if (!coordinator.Cancel(first)) return 8;
+        const auto cancelResult = coordinator.Cancel(first);
+        if (!cancelResult) {
+            std::printf("cancel outcome=%u domain=%u reason=%u native=%d availability=%u lifecycle=%u\n",
+                static_cast<unsigned>(cancelResult.Outcome),
+                static_cast<unsigned>(cancelResult.Detail.Domain),
+                static_cast<unsigned>(cancelResult.Detail.Reason),
+                static_cast<int>(cancelResult.Detail.NativeCode),
+                static_cast<unsigned>(coordinator.Status().Availability),
+                static_cast<unsigned>(coordinator.Status().Lifecycle));
+            return 8;
+        }
         if (coordinator.Status().Availability != CoordinatorAvailability::Ready || coordinator.Status().HasActiveTransaction) return 9;
 
         ActiveTransactionRecord replacement;
